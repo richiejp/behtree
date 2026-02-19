@@ -1,0 +1,144 @@
+{
+  "objects": [
+    {
+      "name": "wrapper",
+      "fields": {
+        "type": "string",
+        "location": "string"
+      }
+    },
+    {
+      "name": "table",
+      "fields": {
+        "type": "string"
+      }
+    },
+    {
+      "name": "bin",
+      "fields": {
+        "type": "string"
+      }
+    },
+    {
+      "name": "robot",
+      "fields": {
+        "location": "string",
+        "holding": "string"
+      }
+    }
+  ],
+  "behaviours": [
+    {
+      "name": "IsHolding",
+      "type": "Condition",
+      "params": {
+        "object": "object_ref"
+      }
+    },
+    {
+      "name": "IsAt",
+      "type": "Condition",
+      "params": {
+        "location": "object_ref"
+      }
+    },
+    {
+      "name": "NavigateTo",
+      "type": "Action",
+      "params": {
+        "location": "object_ref"
+      },
+      "async": true
+    },
+    {
+      "name": "PickUp",
+      "type": "Action",
+      "params": {
+        "object": "object_ref"
+      }
+    },
+    {
+      "name": "DropIn",
+      "type": "Action",
+      "params": {
+        "object": "object_ref",
+        "container": "object_ref"
+      }
+    }
+  ],
+  "tree": {
+    "type": "Sequence",
+    "children": [
+      {
+        "type": "Fallback",
+        "children": [
+          {
+            "type": "Condition",
+            "name": "IsHolding",
+            "params": {
+              "object": "wrapper"
+            }
+          },
+          {
+            "type": "Sequence",
+            "children": [
+              {
+                "type": "Fallback",
+                "children": [
+                  {
+                    "type": "Condition",
+                    "name": "IsAt",
+                    "params": {
+                      "location": "table"
+                    }
+                  },
+                  {
+                    "type": "Action",
+                    "name": "NavigateTo",
+                    "params": {
+                      "location": "table"
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "Action",
+                "name": "PickUp",
+                "params": {
+                  "object": "wrapper"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "Fallback",
+        "children": [
+          {
+            "type": "Condition",
+            "name": "IsAt",
+            "params": {
+              "location": "bin"
+            }
+          },
+          {
+            "type": "Action",
+            "name": "NavigateTo",
+            "params": {
+              "location": "bin"
+            }
+          }
+        ]
+      },
+      {
+        "type": "Action",
+        "name": "DropIn",
+        "params": {
+          "object": "wrapper",
+          "container": "bin"
+        }
+      }
+    ]
+  }
+}

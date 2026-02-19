@@ -1,0 +1,83 @@
+{
+  "tree": {
+    "type": "Sequence",
+    "children": [
+      {
+        "type": "Action",
+        "name": "QuerySwayTree"
+      },
+      {
+        "type": "Fallback",
+        "children": [
+          {
+            "type": "Condition",
+            "name": "IsAppOpen",
+            "params": {
+              "app": "firefox"
+            }
+          },
+          {
+            "type": "Action",
+            "name": "OpenApp",
+            "params": {
+              "app": "firefox"
+            }
+          }
+        ]
+      },
+      {
+        "type": "Fallback",
+        "children": [
+          {
+            "type": "Sequence",
+            "children": [
+              {
+                "type": "Condition",
+                "name": "IsPageOpen",
+                "params": {
+                  "url": "https://github.com/mudler/LocalAI"
+                }
+              },
+              {
+                "type": "Action",
+                "name": "FocusWindow",
+                "params": {
+                  "app": "firefox",
+                  "title": "LocalAI"
+                }
+              }
+            ]
+          },
+          {
+            "type": "Action",
+            "name": "OpenURL",
+            "params": {
+              "url": "https://github.com/mudler/LocalAI"
+            }
+          }
+        ]
+      },
+      {
+        "type": "Fallback",
+        "children": [
+          {
+            "type": "Condition",
+            "name": "IsFocused",
+            "params": {
+              "app": "firefox",
+              "title": "LocalAI"
+            }
+          },
+          {
+            "type": "Action",
+            "name": "FocusWindow",
+            "params": {
+              "app": "firefox",
+              "title": "LocalAI"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

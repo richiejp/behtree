@@ -1,0 +1,125 @@
+{
+  "objects": [
+    {
+      "name": "utterance",
+      "fields": {
+        "text": "string",
+        "timestamp": "number",
+        "processed": "boolean"
+      }
+    },
+    {
+      "name": "task_tree",
+      "fields": {
+        "tree": "object",
+        "source_utterance": "string"
+      }
+    },
+    {
+      "name": "sway_state",
+      "fields": {
+        "windows": "object"
+      }
+    },
+    {
+      "name": "target_url",
+      "fields": {
+        "url": "string",
+        "title": "string"
+      }
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "RealtimeAPI",
+      "description": "OpenAI realtime voice API connection"
+    },
+    {
+      "name": "SwayIPC",
+      "description": "Sway IPC socket for querying and controlling windows"
+    },
+    {
+      "name": "LLM",
+      "description": "LLM endpoint used to convert utterances into task behaviour trees"
+    }
+  ],
+  "behaviours": [
+    {
+      "name": "UserSpeaking",
+      "type": "Condition"
+    },
+    {
+      "name": "HasPendingUtterance",
+      "type": "Condition"
+    },
+    {
+      "name": "HasTaskTree",
+      "type": "Condition"
+    },
+    {
+      "name": "IsAppOpen",
+      "type": "Condition",
+      "params": {
+        "app": "string"
+      }
+    },
+    {
+      "name": "IsPageOpen",
+      "type": "Condition",
+      "params": {
+        "url": "string"
+      }
+    },
+    {
+      "name": "IsFocused",
+      "type": "Condition",
+      "params": {
+        "app": "string",
+        "title": "string"
+      }
+    },
+    {
+      "name": "WaitForSpeech",
+      "type": "Action",
+      "async": true
+    },
+    {
+      "name": "ProcessUtterance",
+      "type": "Action",
+      "async": true
+    },
+    {
+      "name": "RunTaskTree",
+      "type": "Action",
+      "params": {
+        "tree_variable": "string"
+      }
+    },
+    {
+      "name": "QuerySwayTree",
+      "type": "Action"
+    },
+    {
+      "name": "FocusWindow",
+      "type": "Action",
+      "params": {
+        "app": "string",
+        "title": "string"
+      }
+    },
+    {
+      "name": "OpenApp",
+      "type": "Action",
+      "params": {
+        "app": "string"
+      }
+    },
+    {
+      "name": "OpenURL",
+      "type": "Action",
+      "params": {
+        "url": "string"
+      }
+    }
+  ]
+}
