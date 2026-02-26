@@ -1,6 +1,9 @@
 package behtree
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 type Status int
 
@@ -19,7 +22,7 @@ func (s Status) String() string {
 	case Running:
 		return "RUNNING"
 	default:
-		return "UNKNOWN"
+		panic(fmt.Sprintf("Unknown status: %d", s))
 	}
 }
 

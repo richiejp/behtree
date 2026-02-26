@@ -20,7 +20,7 @@ func printNode(n *Node, w io.Writer, prefix string, isRoot bool) {
 	label := nodeLabel(n)
 
 	if isRoot {
-		fmt.Fprintln(w, label)
+		_, _ = fmt.Fprintln(w, label)
 	}
 
 	for i, child := range n.Children {
@@ -33,7 +33,7 @@ func printNode(n *Node, w io.Writer, prefix string, isRoot bool) {
 		}
 
 		childLabel := nodeLabel(child)
-		fmt.Fprintf(w, "%s%s%s\n", prefix, connector, childLabel)
+		_, _ = fmt.Fprintf(w, "%s%s%s\n", prefix, connector, childLabel)
 
 		if len(child.Children) > 0 {
 			printNode(child, w, prefix+childPrefix, false)

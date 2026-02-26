@@ -190,9 +190,9 @@ var _ = Describe("Interpreter", func() {
 			registry = behtree.NewBehaviourRegistry()
 			state = behtree.NewStateFromEnvironment(env)
 
-			state.Set("robot", "location", "start")
-			state.Set("robot", "holding", "")
-			state.Set("wrapper", "location", "table")
+			Expect(state.Set("robot", "location", "start")).To(Succeed())
+			Expect(state.Set("robot", "holding", "")).To(Succeed())
+			Expect(state.Set("wrapper", "location", "table")).To(Succeed())
 
 			registry.Register("IsHolding", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
 				obj := params["object"].(string)
@@ -226,7 +226,7 @@ var _ = Describe("Interpreter", func() {
 				if robotLoc == loc {
 					return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
 				}
-				s.Set("robot", "location", loc)
+				_ = s.Set("robot", "location", loc)
 				return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
 			})
 
@@ -240,7 +240,7 @@ var _ = Describe("Interpreter", func() {
 				if req == behtree.RequestFailure {
 					return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 				}
-				s.Set("robot", "holding", obj)
+				_ = s.Set("robot", "holding", obj)
 				return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
 			})
 
@@ -255,8 +255,8 @@ var _ = Describe("Interpreter", func() {
 				if req == behtree.RequestFailure {
 					return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 				}
-				s.Set("robot", "holding", "")
-				s.Set(obj, "location", container)
+				_ = s.Set("robot", "holding", "")
+				_ = s.Set(obj, "location", container)
 				return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
 			})
 		})
@@ -324,7 +324,7 @@ var _ = Describe("RunTaskTree", func() {
 		registry := behtree.NewBehaviourRegistry()
 		state := behtree.NewStateFromEnvironment(env)
 
-		state.Set("task_tree", "tree", innerDoc.Tree)
+		Expect(state.Set("task_tree", "tree", innerDoc.Tree)).To(Succeed())
 
 		registry.Register("HasTaskTree", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
 			val, _ := s.Get("task_tree", "tree")

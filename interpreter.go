@@ -96,7 +96,7 @@ func (ip *Interpreter) tickLeaf(n *Node) (Status, error) {
 
 func (ip *Interpreter) tickInverter(n *Node) (Status, error) {
 	if len(n.Children) != 1 {
-		return Failure, fmt.Errorf("Inverter requires exactly 1 child")
+		return Failure, fmt.Errorf("inverter requires exactly 1 child")
 	}
 	status, err := ip.Tick(n.Children[0])
 	if err != nil {
