@@ -1,4 +1,4 @@
-.PHONY: fmt check-fmt metrics lint complexity loc dupl test all
+.PHONY: fmt check-fmt metrics lint complexity loc dupl test all benchmark
 
 all: check-fmt lint metrics test
 
@@ -46,6 +46,11 @@ dupl:
 # Run golangci-lint with all metric linters
 lint:
 	golangci-lint run
+
+## Building ------------------------------------------------------------------
+
+benchmark:
+	go build -o benchmark ./cmd/benchmark
 
 ## Testing -------------------------------------------------------------------
 
