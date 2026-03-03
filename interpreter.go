@@ -3,19 +3,34 @@ package behtree
 import "fmt"
 
 type Interpreter struct {
-	env      *Environment
-	registry *BehaviourRegistry
-	state    *State
-	request  OutcomeRequest
+	env         *Environment
+	registry    *BehaviourRegistry
+	state       *State
+	requestFunc func() OutcomeRequest
+	tracer      Tracer
 }
 
 func NewInterpreter(env *Environment, registry *BehaviourRegistry, state *State) *Interpreter {
 	return &Interpreter{
-		env:      env,
-		registry: registry,
-		state:    state,
-		request:  RequestSuccess,
+		env:         env,
+		registry:    registry,
+		state:       state,
+		requestFunc: fixedRequest(RequestSuccess),
+		tracer:      NoopTracer{},
 	}
+}
+
+func fixedRequest(r OutcomeRequest) func() OutcomeRequest {
+	return func() OutcomeRequest { return r }
+}
+
+// SetTracer sets the tracer for this interpreter. Pass nil to disable.
+func (ip *Interpreter) SetTracer(t Tracer) {
+	if t == nil {
+		ip.tracer = NoopTracer{}
+		return
+	}
+	ip.tracer = t
 }
 
 func (ip *Interpreter) State() *State {
@@ -23,7 +38,13 @@ func (ip *Interpreter) State() *State {
 }
 
 func (ip *Interpreter) SetOutcomeRequest(r OutcomeRequest) {
-	ip.request = r
+	ip.requestFunc = fixedRequest(r)
+}
+
+// SetRequestSource sets a function that provides outcome requests per leaf visit.
+// Each call to the function should return the next request in the sequence.
+func (ip *Interpreter) SetRequestSource(fn func() OutcomeRequest) {
+	ip.requestFunc = fn
 }
 
 func (ip *Interpreter) Tick(n *Node) (Status, error) {
@@ -31,24 +52,32 @@ func (ip *Interpreter) Tick(n *Node) (Status, error) {
 		return Failure, fmt.Errorf("nil node")
 	}
 
+	ip.tracer.EnterNode(n)
+
+	var status Status
+	var err error
+
 	switch n.Type {
 	case SequenceNode:
-		return ip.tickSequence(n)
+		status, err = ip.tickSequence(n)
 	case FallbackNode:
-		return ip.tickFallback(n)
+		status, err = ip.tickFallback(n)
 	case ConditionNode, ActionNode:
-		return ip.tickLeaf(n)
+		status, err = ip.tickLeaf(n)
 	case InverterNode:
-		return ip.tickInverter(n)
+		status, err = ip.tickInverter(n)
 	case ForceSuccessNode:
-		return ip.tickForceSuccess(n)
+		status, err = ip.tickForceSuccess(n)
 	case ForceFailureNode:
-		return ip.tickForceFailure(n)
+		status, err = ip.tickForceFailure(n)
 	case RetryUntilSuccessfulNode:
-		return ip.tickRetryUntilSuccessful(n)
+		status, err = ip.tickRetryUntilSuccessful(n)
 	default:
-		return Failure, fmt.Errorf("unknown node type %q", n.Type)
+		status, err = Failure, fmt.Errorf("unknown node type %q", n.Type)
 	}
+
+	ip.tracer.ExitNode(status, err)
+	return status, err
 }
 
 func (ip *Interpreter) tickSequence(n *Node) (Status, error) {
@@ -87,9 +116,17 @@ func (ip *Interpreter) tickLeaf(n *Node) (Status, error) {
 		return Failure, err
 	}
 
-	result := handler(n.Params, ip.state, ip.request)
+	request := ip.requestFunc()
+	ip.tracer.RecordRequest(request)
+
+	result := handler(n.Params, ip.state, request)
+	if len(result.Logs) > 0 {
+		ip.tracer.LogHandler(result.Logs)
+	}
+	ip.tracer.SnapshotState(ip.state)
+
 	if !result.Compatible {
-		return Failure, fmt.Errorf("handler %q: state incompatible with request %s", n.Name, ip.request)
+		return Failure, fmt.Errorf("handler %q: state incompatible with request %s", n.Name, request)
 	}
 	return result.Status, nil
 }

@@ -26,6 +26,7 @@ func (o OutcomeRequest) String() string {
 type HandlerResult struct {
 	Status     Status
 	Compatible bool
+	Logs       []LogEntry
 }
 
 type Handler func(params Params, state *State, request OutcomeRequest) HandlerResult

@@ -1,5 +1,11 @@
 package behtree
 
+import (
+	"encoding/json"
+	"io"
+	"time"
+)
+
 type BenchmarkDifficulty int
 
 const (
@@ -24,6 +30,12 @@ func (d BenchmarkDifficulty) String() string {
 	}
 }
 
+// SimulateOptions controls simulation behavior.
+type SimulateOptions struct {
+	TraceEnabled bool
+	CaptureState bool
+}
+
 type BenchmarkCase struct {
 	Name        string
 	Description string
@@ -31,7 +43,7 @@ type BenchmarkCase struct {
 	Environment *Environment
 	Prompt      string
 	Validate    func(tree *Node, env *Environment) []ValidationError
-	Simulate    func(tree *Node, env *Environment, registry *BehaviourRegistry) []*ScenarioResult
+	Simulate    func(tree *Node, env *Environment, registry *BehaviourRegistry, opts SimulateOptions) []*ScenarioResult
 }
 
 type BenchmarkResult struct {
@@ -44,7 +56,29 @@ type BenchmarkResult struct {
 }
 
 type BenchmarkSuite struct {
-	Cases []*BenchmarkCase
+	Cases        []*BenchmarkCase
+	SimulateOpts SimulateOptions
+}
+
+type SavedTree struct {
+	CaseName  string    `json:"case_name"`
+	Model     string    `json:"model"`
+	Timestamp time.Time `json:"timestamp"`
+	Tree      *Node     `json:"tree"`
+}
+
+func WriteSavedTree(w io.Writer, st *SavedTree) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(st)
+}
+
+func ReadSavedTree(r io.Reader) (*SavedTree, error) {
+	var st SavedTree
+	if err := json.NewDecoder(r).Decode(&st); err != nil {
+		return nil, err
+	}
+	return &st, nil
 }
 
 func NewBenchmarkSuite() *BenchmarkSuite {
@@ -55,65 +89,67 @@ func (s *BenchmarkSuite) Add(c *BenchmarkCase) {
 	s.Cases = append(s.Cases, c)
 }
 
+func (s *BenchmarkSuite) EvalTree(bc *BenchmarkCase, tree *Node) *BenchmarkResult {
+	result := &BenchmarkResult{
+		Case:          bc,
+		GeneratedTree: tree,
+	}
+
+	env := &Environment{}
+	env.Merge(bc.Environment)
+	if tree != nil {
+		env.Trees = append(env.Trees, tree)
+	}
+
+	if bc.Validate != nil {
+		result.Validation = bc.Validate(tree, env)
+	} else {
+		result.Validation = Validate(env)
+	}
+
+	if len(result.Validation) > 0 {
+		return result
+	}
+
+	if bc.Simulate != nil {
+		registry := NewBehaviourRegistry()
+		result.Scenarios = bc.Simulate(tree, env, registry, s.SimulateOpts)
+	}
+
+	result.Passed = true
+	if result.Scenarios != nil {
+		for _, sr := range result.Scenarios {
+			if sr.Skipped {
+				continue
+			}
+			lastTick := sr.Ticks[len(sr.Ticks)-1]
+			if lastTick.Err != nil || lastTick.Status == Failure {
+				result.Passed = false
+				break
+			}
+		}
+	}
+
+	return result
+}
+
 func (s *BenchmarkSuite) Run(generateTree func(prompt string, env *Environment) ([]byte, error)) []*BenchmarkResult {
 	var results []*BenchmarkResult
 
 	for _, bc := range s.Cases {
-		result := &BenchmarkResult{Case: bc}
-
 		treeJSON, err := generateTree(bc.Prompt, bc.Environment)
 		if err != nil {
-			result.ParseError = err
-			results = append(results, result)
+			results = append(results, &BenchmarkResult{Case: bc, ParseError: err})
 			continue
 		}
 
 		doc, err := ParseDocument(treeJSON)
 		if err != nil {
-			result.ParseError = err
-			results = append(results, result)
+			results = append(results, &BenchmarkResult{Case: bc, ParseError: err})
 			continue
 		}
 
-		result.GeneratedTree = doc.Tree
-
-		env := &Environment{}
-		env.Merge(bc.Environment)
-		if doc.Tree != nil {
-			env.Trees = append(env.Trees, doc.Tree)
-		}
-
-		if bc.Validate != nil {
-			result.Validation = bc.Validate(doc.Tree, env)
-		} else {
-			result.Validation = Validate(env)
-		}
-
-		if len(result.Validation) > 0 {
-			results = append(results, result)
-			continue
-		}
-
-		if bc.Simulate != nil {
-			registry := NewBehaviourRegistry()
-			result.Scenarios = bc.Simulate(doc.Tree, env, registry)
-		}
-
-		result.Passed = len(result.Validation) == 0 && result.ParseError == nil
-		if result.Scenarios != nil {
-			for _, sr := range result.Scenarios {
-				if sr.Skipped {
-					continue
-				}
-				lastTick := sr.Ticks[len(sr.Ticks)-1]
-				if lastTick.Err != nil || lastTick.Status == Failure {
-					result.Passed = false
-					break
-				}
-			}
-		}
-
-		results = append(results, result)
+		results = append(results, s.EvalTree(bc, doc.Tree))
 	}
 
 	return results

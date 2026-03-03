@@ -8,6 +8,7 @@ type ScenarioResult struct {
 	Skipped  bool
 	SkipMsg  string
 	Final    *State
+	Trace    *ScenarioTrace
 }
 
 type TickResult struct {
@@ -16,9 +17,11 @@ type TickResult struct {
 }
 
 type SimulationHarness struct {
-	env      *Environment
-	registry *BehaviourRegistry
-	tree     *Node
+	env          *Environment
+	registry     *BehaviourRegistry
+	tree         *Node
+	traceEnabled bool
+	captureState bool
 }
 
 func NewSimulationHarness(env *Environment, registry *BehaviourRegistry, tree *Node) *SimulationHarness {
@@ -29,6 +32,14 @@ func NewSimulationHarness(env *Environment, registry *BehaviourRegistry, tree *N
 	}
 }
 
+func (h *SimulationHarness) SetTracing(enabled bool) {
+	h.traceEnabled = enabled
+}
+
+func (h *SimulationHarness) SetCaptureState(enabled bool) {
+	h.captureState = enabled
+}
+
 func (h *SimulationHarness) RunScenario(requests []OutcomeRequest, initialState *State, maxTicks int) *ScenarioResult {
 	result := &ScenarioResult{
 		Requests: requests,
@@ -37,38 +48,67 @@ func (h *SimulationHarness) RunScenario(requests []OutcomeRequest, initialState 
 	state := initialState.Clone()
 	ip := NewInterpreter(h.env, h.registry, state)
 
+	var recorder *RecordingTracer
+	if h.traceEnabled {
+		recorder = NewRecordingTracer(h.captureState)
+		ip.SetTracer(recorder)
+		result.Trace = &ScenarioTrace{Requests: requests}
+	}
+
 	requestIdx := 0
-	for tick := 0; tick < maxTicks; tick++ {
+	ip.SetRequestSource(func() OutcomeRequest {
 		if requestIdx < len(requests) {
-			ip.SetOutcomeRequest(requests[requestIdx])
-		} else {
-			ip.SetOutcomeRequest(RequestSuccess)
+			r := requests[requestIdx]
+			requestIdx++
+			return r
+		}
+		return RequestSuccess
+	})
+
+	for tick := 0; tick < maxTicks; tick++ {
+		if recorder != nil {
+			recorder.Reset()
 		}
 
 		status, err := ip.Tick(h.tree)
 		tr := TickResult{Status: status, Err: err}
 		result.Ticks = append(result.Ticks, tr)
 
+		if recorder != nil {
+			result.Trace.Ticks = append(result.Trace.Ticks, TickTrace{
+				TickIndex: tick,
+				Root:      recorder.Root(),
+			})
+		}
+
 		if err != nil {
 			if isIncompatible(err) {
 				result.Skipped = true
 				result.SkipMsg = err.Error()
 				result.Final = state
+				if result.Trace != nil {
+					result.Trace.Skipped = true
+					result.Trace.SkipMsg = err.Error()
+					result.Trace.FinalState = state
+				}
 				return result
 			}
 		}
 
-		if requestIdx < len(requests) {
-			requestIdx++
-		}
-
 		if status == Success || status == Failure {
 			result.Final = state
+			if result.Trace != nil {
+				result.Trace.FinalState = state
+				result.Trace.Failed = status == Failure
+			}
 			return result
 		}
 	}
 
 	result.Final = state
+	if result.Trace != nil {
+		result.Trace.FinalState = state
+	}
 	return result
 }
 

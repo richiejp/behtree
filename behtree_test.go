@@ -362,4 +362,199 @@ var _ = Describe("SimulationHarness", func() {
 		Expect(result.Ticks).To(HaveLen(1))
 		Expect(result.Ticks[0].Status).To(Equal(behtree.Success))
 	})
+
+	Context("per-leaf request consumption", func() {
+		// Regression tests for the bug where requests were consumed per-tick
+		// instead of per-leaf-visit. The old code applied a single OutcomeRequest
+		// to ALL leaves in a tick, making it impossible to request different
+		// outcomes for different leaves within the same tick.
+
+		var (
+			env      *behtree.Environment
+			registry *behtree.BehaviourRegistry
+		)
+
+		// Tree: Sequence[ Condition:Check, Action:DoIt ]
+		// Two leaves visited per tick when Check succeeds.
+		BeforeEach(func() {
+			doc, err := behtree.ParseDocument([]byte(`{
+				"behaviours": [
+					{"name":"Check","type":"Condition"},
+					{"name":"DoIt","type":"Action"}
+				],
+				"tree": {
+					"type":"Sequence",
+					"children":[
+						{"type":"Condition","name":"Check"},
+						{"type":"Action","name":"DoIt"}
+					]
+				}
+			}`))
+			Expect(err).NotTo(HaveOccurred())
+			env = behtree.MergeDocuments(doc)
+
+			registry = behtree.NewBehaviourRegistry()
+			// Check: obeys the requested outcome
+			registry.Register("Check", func(_ behtree.Params, _ *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
+				switch req {
+				case behtree.RequestFailure:
+					return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
+				default:
+					return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+				}
+			})
+			// DoIt: obeys the requested outcome
+			registry.Register("DoIt", func(_ behtree.Params, _ *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
+				switch req {
+				case behtree.RequestFailure:
+					return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
+				case behtree.RequestRunning:
+					return behtree.HandlerResult{Status: behtree.Running, Compatible: true}
+				default:
+					return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+				}
+			})
+		})
+
+		It("gives different requests to different leaves in the same tick", func() {
+			harness := behtree.NewSimulationHarness(env, registry, env.Trees[0])
+			harness.SetTracing(true)
+			state := behtree.NewState()
+
+			// Request[0]=Success for Check, Request[1]=Running for DoIt
+			result := harness.RunScenario(
+				[]behtree.OutcomeRequest{behtree.RequestSuccess, behtree.RequestRunning},
+				state, 10,
+			)
+			Expect(result.Skipped).To(BeFalse())
+			// Tick 1: Check=Success, DoIt=Running → tree returns RUNNING
+			Expect(result.Ticks[0].Status).To(Equal(behtree.Running))
+
+			// Verify per-leaf requests in the trace
+			root := result.Trace.Ticks[0].Root
+			Expect(root.Children).To(HaveLen(2))
+			Expect(*root.Children[0].OutcomeRequest).To(Equal(behtree.RequestSuccess))
+			Expect(*root.Children[1].OutcomeRequest).To(Equal(behtree.RequestRunning))
+		})
+
+		It("consumes one request per leaf visit not per tick", func() {
+			harness := behtree.NewSimulationHarness(env, registry, env.Trees[0])
+			state := behtree.NewState()
+
+			// 4 requests: tick 1 consumes [0] and [1], tick 2 consumes [2] and [3]
+			result := harness.RunScenario(
+				[]behtree.OutcomeRequest{
+					behtree.RequestSuccess, behtree.RequestRunning, // tick 1: Check=S, DoIt=R → RUNNING
+					behtree.RequestSuccess, behtree.RequestSuccess, // tick 2: Check=S, DoIt=S → SUCCESS
+				},
+				state, 10,
+			)
+			Expect(result.Skipped).To(BeFalse())
+			Expect(result.Ticks).To(HaveLen(2))
+			Expect(result.Ticks[0].Status).To(Equal(behtree.Running))
+			Expect(result.Ticks[1].Status).To(Equal(behtree.Success))
+		})
+
+		It("allows condition to fail while action would succeed", func() {
+			harness := behtree.NewSimulationHarness(env, registry, env.Trees[0])
+			state := behtree.NewState()
+
+			// Request[0]=Failure for Check → Sequence short-circuits, DoIt never reached
+			// Only 1 request consumed in this tick.
+			result := harness.RunScenario(
+				[]behtree.OutcomeRequest{behtree.RequestFailure, behtree.RequestSuccess},
+				state, 10,
+			)
+			Expect(result.Skipped).To(BeFalse())
+			Expect(result.Ticks).To(HaveLen(1))
+			Expect(result.Ticks[0].Status).To(Equal(behtree.Failure))
+		})
+
+		It("defaults to RequestSuccess when requests are exhausted", func() {
+			harness := behtree.NewSimulationHarness(env, registry, env.Trees[0])
+			state := behtree.NewState()
+
+			// Only 2 requests (enough for tick 1). Tick 2 defaults to RequestSuccess.
+			result := harness.RunScenario(
+				[]behtree.OutcomeRequest{
+					behtree.RequestSuccess, behtree.RequestRunning, // tick 1: RUNNING
+				},
+				state, 10,
+			)
+			Expect(result.Skipped).To(BeFalse())
+			Expect(result.Ticks).To(HaveLen(2))
+			Expect(result.Ticks[0].Status).To(Equal(behtree.Running))
+			Expect(result.Ticks[1].Status).To(Equal(behtree.Success)) // defaults to Success
+		})
+	})
+
+	Context("per-leaf requests with Fallback tree", func() {
+		// Tree: Fallback[ Condition:IsReady, Action:Prepare ]
+		// This is the pattern from the original bug report: a Fallback where
+		// the condition checks state and the action can return different outcomes.
+
+		It("handles different requests for condition and action in fallback", func() {
+			doc, err := behtree.ParseDocument([]byte(`{
+				"behaviours": [
+					{"name":"IsReady","type":"Condition"},
+					{"name":"Prepare","type":"Action"}
+				],
+				"tree": {
+					"type":"Sequence",
+					"children":[{
+						"type":"Fallback",
+						"children":[
+							{"type":"Condition","name":"IsReady"},
+							{"type":"Action","name":"Prepare"}
+						]
+					}]
+				}
+			}`))
+			Expect(err).NotTo(HaveOccurred())
+			env := behtree.MergeDocuments(doc)
+
+			registry := behtree.NewBehaviourRegistry()
+			registry.Register("IsReady", func(_ behtree.Params, _ *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
+				if req == behtree.RequestSuccess {
+					return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+				}
+				return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
+			})
+			registry.Register("Prepare", func(_ behtree.Params, _ *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
+				switch req {
+				case behtree.RequestFailure:
+					return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
+				case behtree.RequestRunning:
+					return behtree.HandlerResult{Status: behtree.Running, Compatible: true}
+				default:
+					return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+				}
+			})
+
+			harness := behtree.NewSimulationHarness(env, registry, env.Trees[0])
+			harness.SetTracing(true)
+			state := behtree.NewState()
+
+			// Request[0]=Failure for IsReady, Request[1]=Running for Prepare
+			// Fallback: IsReady fails → try Prepare → Running
+			result := harness.RunScenario(
+				[]behtree.OutcomeRequest{
+					behtree.RequestFailure, behtree.RequestRunning, // tick 1
+					behtree.RequestFailure, behtree.RequestSuccess, // tick 2
+				},
+				state, 10,
+			)
+			Expect(result.Skipped).To(BeFalse())
+			Expect(result.Ticks).To(HaveLen(2))
+			Expect(result.Ticks[0].Status).To(Equal(behtree.Running))
+			Expect(result.Ticks[1].Status).To(Equal(behtree.Success))
+
+			// Verify trace shows per-leaf requests
+			tick1 := result.Trace.Ticks[0].Root
+			fallback := tick1.Children[0]
+			Expect(fallback.Children).To(HaveLen(2))
+			Expect(*fallback.Children[0].OutcomeRequest).To(Equal(behtree.RequestFailure))
+			Expect(*fallback.Children[1].OutcomeRequest).To(Equal(behtree.RequestRunning))
+		})
+	})
 })

@@ -59,3 +59,45 @@ func formatParams(p Params) string {
 	}
 	return strings.Join(parts, ", ")
 }
+
+func PrintEnvironment(env *Environment, w io.Writer) {
+	if len(env.Objects) > 0 {
+		_, _ = fmt.Fprintln(w, "Objects:")
+		for _, obj := range env.Objects {
+			_, _ = fmt.Fprintf(w, "  %s\n", obj.Name)
+			for field, ftype := range obj.Fields {
+				_, _ = fmt.Fprintf(w, "    %s: %s\n", field, ftype)
+			}
+		}
+	}
+	if len(env.Interfaces) > 0 {
+		_, _ = fmt.Fprintln(w, "Interfaces:")
+		for _, iface := range env.Interfaces {
+			if iface.Description != "" {
+				_, _ = fmt.Fprintf(w, "  %s - %s\n", iface.Name, iface.Description)
+			} else {
+				_, _ = fmt.Fprintf(w, "  %s\n", iface.Name)
+			}
+		}
+	}
+	if len(env.Behaviours) > 0 {
+		_, _ = fmt.Fprintln(w, "Behaviours:")
+		for _, b := range env.Behaviours {
+			params := ""
+			if len(b.Params) > 0 {
+				parts := make([]string, 0, len(b.Params))
+				for name, ptype := range b.Params {
+					parts = append(parts, fmt.Sprintf("%s: %s", name, ptype))
+				}
+				params = "(" + strings.Join(parts, ", ") + ")"
+			}
+			_, _ = fmt.Fprintf(w, "  [%s] %s%s\n", b.Type, b.Name, params)
+		}
+	}
+}
+
+func PrintEnvironmentString(env *Environment) string {
+	var sb strings.Builder
+	PrintEnvironment(env, &sb)
+	return sb.String()
+}

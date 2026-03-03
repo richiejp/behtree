@@ -11,45 +11,30 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 )
 
+// BehTreeGBNF is a GBNF grammar that constrains LLM output to valid
+// behaviour tree JSON. It supports full recursion (unlike JSON Schema
+// workarounds) and produces params as plain {"key": "value"} objects.
+const BehTreeGBNF = `root        ::= "{" ws "\"tree\"" ws ":" ws node ws "}"
+node        ::= "{" ws type-member name-part params-part children-part ws "}"
+type-member ::= "\"type\"" ws ":" ws node-type
+node-type   ::= "\"Sequence\"" | "\"Fallback\"" | "\"Condition\"" | "\"Action\""
+name-part   ::= ( "," ws "\"name\"" ws ":" ws string )?
+params-part ::= ( "," ws "\"params\"" ws ":" ws params )?
+children-part ::= ( "," ws "\"children\"" ws ":" ws "[" ws node-list? ws "]" )?
+params      ::= "{" ws param-list? ws "}"
+param-list  ::= param ( "," ws param )*
+param       ::= string ws ":" ws string
+node-list   ::= node ( "," ws node )*
+string      ::= "\"" chars "\""
+chars       ::= char*
+char        ::= [^"\\] | "\\" escape-char
+escape-char ::= ["\\/bfnrt]
+ws          ::= [ \t\n]*
+`
+
 // GenerateTreeFunc is the signature for a function that generates a
 // behaviour tree from an LLM given a prompt and environment.
 type GenerateTreeFunc = func(prompt string, env *behtree.Environment) ([]byte, error)
-
-// TreeSchema defines the JSON schema for structured output mode.
-// Uses strict:false because the params field needs dynamic keys
-// (additionalProperties), which is incompatible with strict:true
-// in the OpenAI API. Providers that don't enforce strict mode
-// (LocalAI, Anthropic) work fine either way.
-var TreeSchema = json.RawMessage(`{
-	"type": "object",
-	"properties": {
-		"tree": { "$ref": "#/$defs/node" }
-	},
-	"required": ["tree"],
-	"additionalProperties": false,
-	"$defs": {
-		"node": {
-			"type": "object",
-			"properties": {
-				"type": {
-					"type": "string",
-					"enum": ["Sequence", "Fallback", "Condition", "Action"]
-				},
-				"name": { "type": "string" },
-				"params": {
-					"type": "object",
-					"additionalProperties": { "type": "string" }
-				},
-				"children": {
-					"type": "array",
-					"items": { "$ref": "#/$defs/node" }
-				}
-			},
-			"required": ["type"],
-			"additionalProperties": false
-		}
-	}
-}`)
 
 const systemPrompt = `You are an expert at constructing behaviour trees. Generate a behaviour tree in JSON format for the given task.
 
@@ -109,33 +94,21 @@ func BuildSystemPrompt(env *behtree.Environment) string {
 }
 
 // NewGenerateTree returns a GenerateTreeFunc that uses the given LLM
-// to generate behaviour trees.
-func NewGenerateTree(llm cogito.LLM, model, jsonMode string, verbose bool) GenerateTreeFunc {
+// to generate behaviour trees. Grammar-based constraining (for LocalAI)
+// is configured on the client before calling this. For providers without
+// grammar support (Anthropic, OpenAI), the raw response is passed through
+// ExtractJSON to find the JSON object.
+func NewGenerateTree(llm cogito.LLM, model string, verbose bool) GenerateTreeFunc {
 	return func(prompt string, env *behtree.Environment) ([]byte, error) {
 		sysPrompt := BuildSystemPrompt(env)
 
 		req := openai.ChatCompletionRequest{
-			Model: model,
+			Model:     model,
+			MaxTokens: 4096,
 			Messages: []openai.ChatCompletionMessage{
 				{Role: openai.ChatMessageRoleSystem, Content: sysPrompt},
 				{Role: openai.ChatMessageRoleUser, Content: prompt},
 			},
-		}
-
-		switch jsonMode {
-		case "json_schema":
-			req.ResponseFormat = &openai.ChatCompletionResponseFormat{
-				Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
-				JSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
-					Name:   "behaviour_tree",
-					Schema: TreeSchema,
-					Strict: false,
-				},
-			}
-		case "object":
-			req.ResponseFormat = &openai.ChatCompletionResponseFormat{
-				Type: openai.ChatCompletionResponseFormatTypeJSONObject,
-			}
 		}
 
 		reply, usage, err := llm.CreateChatCompletion(context.Background(), req)
@@ -146,6 +119,7 @@ func NewGenerateTree(llm cogito.LLM, model, jsonMode string, verbose bool) Gener
 		if verbose {
 			fmt.Printf("  tokens: prompt=%d completion=%d total=%d\n",
 				usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
+			fmt.Printf("  stop_reason: %s\n", reply.ChatCompletionResponse.Choices[0].FinishReason)
 		}
 
 		choices := reply.ChatCompletionResponse.Choices
@@ -154,13 +128,14 @@ func NewGenerateTree(llm cogito.LLM, model, jsonMode string, verbose bool) Gener
 		}
 
 		content := choices[0].Message.Content
+		if verbose {
+			fmt.Printf("  raw response: %s\n", content)
+		}
 		if content == "" {
 			return nil, fmt.Errorf("LLM returned empty content")
 		}
 
-		if jsonMode == "object" {
-			content = ExtractJSON(content)
-		}
+		content = ExtractJSON(content)
 
 		return []byte(content), nil
 	}

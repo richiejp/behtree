@@ -29,10 +29,12 @@ func RobotCase(testdataDir string) (*behtree.BenchmarkCase, error) {
 	}, nil
 }
 
-func robotSimulate(tree *behtree.Node, env *behtree.Environment, registry *behtree.BehaviourRegistry) []*behtree.ScenarioResult {
+func robotSimulate(tree *behtree.Node, env *behtree.Environment, registry *behtree.BehaviourRegistry, opts behtree.SimulateOptions) []*behtree.ScenarioResult {
 	RegisterRobotHandlers(registry)
 	harness := behtree.NewSimulationHarness(env, registry, tree)
-	return harness.RunAllOutcomes(10)
+	harness.SetTracing(opts.TraceEnabled)
+	harness.SetCaptureState(opts.CaptureState)
+	return harness.RunAllOutcomes(100)
 }
 
 // DesktopCase constructs the desktop open-URL benchmark case.
