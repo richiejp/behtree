@@ -32,25 +32,47 @@ const (
 	ParamBoolean      ParamType = "boolean"
 )
 
-type BehaviourDef struct {
-	Name   string               `json:"name"`
-	Type   NodeType             `json:"type"`
-	Params map[string]ParamType `json:"params,omitempty"`
-	Async  bool                 `json:"async,omitempty"`
+type ActionDef struct {
+	Name           string               `json:"name"`
+	Type           NodeType             `json:"type"`
+	Params         map[string]ParamType `json:"params,omitempty"`
+	Async          bool                 `json:"async,omitempty"`
+	Preconditions  []Condition          `json:"preconditions,omitempty"`
+	Postconditions []Condition          `json:"postconditions,omitempty"`
 }
+
+// BehaviourDef is an alias for backward compatibility.
+type BehaviourDef = ActionDef
 
 type Environment struct {
 	Objects    []ObjectDef    `json:"objects,omitempty"`
 	Interfaces []InterfaceDef `json:"interfaces,omitempty"`
-	Behaviours []BehaviourDef `json:"behaviours,omitempty"`
+	Actions    []ActionDef    `json:"actions,omitempty"`
 	Trees      []*Node        `json:"trees,omitempty"`
+	Goal       []Condition    `json:"goal,omitempty"`
+
+	// Behaviours is an alias for loading legacy JSON with "behaviours" key.
+	// Merge() combines both into Actions.
+	Behaviours []ActionDef `json:"behaviours,omitempty"`
 }
 
 func (e *Environment) Merge(other *Environment) {
 	e.Objects = append(e.Objects, other.Objects...)
 	e.Interfaces = append(e.Interfaces, other.Interfaces...)
-	e.Behaviours = append(e.Behaviours, other.Behaviours...)
+	e.Actions = append(e.Actions, other.Actions...)
+	e.Actions = append(e.Actions, other.Behaviours...)
 	e.Trees = append(e.Trees, other.Trees...)
+	if len(other.Goal) > 0 {
+		e.Goal = other.Goal
+	}
+}
+
+// ConsolidateActions moves any legacy Behaviours into Actions.
+func (e *Environment) ConsolidateActions() {
+	if len(e.Behaviours) > 0 {
+		e.Actions = append(e.Actions, e.Behaviours...)
+		e.Behaviours = nil
+	}
 }
 
 func (e *Environment) FindObject(name string) *ObjectDef {
@@ -71,13 +93,18 @@ func (e *Environment) FindInterface(name string) *InterfaceDef {
 	return nil
 }
 
-func (e *Environment) FindBehaviour(name string) *BehaviourDef {
-	for i := range e.Behaviours {
-		if e.Behaviours[i].Name == name {
-			return &e.Behaviours[i]
+func (e *Environment) FindAction(name string) *ActionDef {
+	for i := range e.Actions {
+		if e.Actions[i].Name == name {
+			return &e.Actions[i]
 		}
 	}
 	return nil
+}
+
+// FindBehaviour is an alias for FindAction for backward compatibility.
+func (e *Environment) FindBehaviour(name string) *ActionDef {
+	return e.FindAction(name)
 }
 
 func (e *Environment) ObjectNames() []string {
@@ -88,10 +115,15 @@ func (e *Environment) ObjectNames() []string {
 	return names
 }
 
-func (e *Environment) BehaviourNames() []string {
-	names := make([]string, len(e.Behaviours))
-	for i, b := range e.Behaviours {
-		names[i] = fmt.Sprintf("%s(%s)", b.Name, b.Type)
+func (e *Environment) ActionNames() []string {
+	names := make([]string, len(e.Actions))
+	for i, a := range e.Actions {
+		names[i] = fmt.Sprintf("%s(%s)", a.Name, a.Type)
 	}
 	return names
+}
+
+// BehaviourNames is an alias for ActionNames for backward compatibility.
+func (e *Environment) BehaviourNames() []string {
+	return e.ActionNames()
 }

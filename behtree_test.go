@@ -1,7 +1,6 @@
 package behtree_test
 
 import (
-	"os"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -12,14 +11,12 @@ import (
 )
 
 var _ = Describe("Document Parsing", func() {
-	Context("robot example", func() {
+	Context("robot v2 example", func() {
 		var doc *behtree.Document
 		var err error
 
 		BeforeEach(func() {
-			data, readErr := os.ReadFile("testdata/robot.json")
-			Expect(readErr).NotTo(HaveOccurred())
-			doc, err = behtree.ParseDocument(data)
+			doc, err = behtree.LoadDocument("testdata/robot_v2.json")
 		})
 
 		It("parses without error", func() {
@@ -32,24 +29,29 @@ var _ = Describe("Document Parsing", func() {
 			Expect(doc.Objects[0].Name).To(Equal("wrapper"))
 		})
 
-		It("has behaviours", func() {
-			Expect(doc.Behaviours).To(HaveLen(5))
+		It("has actions with preconditions", func() {
+			Expect(doc.Actions).To(HaveLen(3))
+			// PickUp has preconditions
+			Expect(doc.Actions[1].Name).To(Equal("PickUp"))
+			Expect(doc.Actions[1].Preconditions).To(HaveLen(2))
 		})
 
-		It("has a tree", func() {
-			Expect(doc.Tree).NotTo(BeNil())
-			Expect(doc.Tree.Type).To(Equal(behtree.SequenceNode))
+		It("has a goal", func() {
+			Expect(doc.Goal).To(HaveLen(1))
+			Expect(doc.Goal[0].Object).To(Equal("wrapper"))
+			Expect(doc.Goal[0].Field).To(Equal("location"))
+			Expect(doc.Goal[0].Value).To(Equal("bin"))
 		})
 	})
 
-	Context("desktop example with multiple files", func() {
+	Context("desktop v2 example with multiple files", func() {
 		var env *behtree.Environment
 
 		BeforeEach(func() {
 			var err error
 			env, err = behtree.LoadEnvironment(
-				"testdata/desktop_env.json",
-				"testdata/desktop_outer.json",
+				"testdata/desktop_v2.json",
+				"testdata/desktop_v2_outer.json",
 			)
 			Expect(err).NotTo(HaveOccurred())
 		})
@@ -58,12 +60,14 @@ var _ = Describe("Document Parsing", func() {
 			Expect(env.Objects).To(HaveLen(4))
 		})
 
-		It("merges interfaces from env file", func() {
-			Expect(env.Interfaces).To(HaveLen(3))
+		It("merges actions from env file", func() {
+			Expect(env.Actions).To(HaveLen(6))
 		})
 
-		It("merges behaviours from env file", func() {
-			Expect(env.Behaviours).To(HaveLen(13))
+		It("has a goal", func() {
+			Expect(env.Goal).To(HaveLen(1))
+			Expect(env.Goal[0].Object).To(Equal("firefox"))
+			Expect(env.Goal[0].Field).To(Equal("active_page"))
 		})
 
 		It("has the outer tree", func() {
@@ -74,22 +78,23 @@ var _ = Describe("Document Parsing", func() {
 })
 
 var _ = Describe("Validation", func() {
-	Context("valid robot tree", func() {
-		It("produces no errors", func() {
-			env, err := behtree.LoadEnvironment("testdata/robot.json")
+	Context("action-only environment", func() {
+		It("produces no errors for action behaviours", func() {
+			doc, err := behtree.ParseDocument([]byte(`{
+				"objects": [{"name":"robot","fields":{"location":"string"}}],
+				"behaviours": [
+					{"name":"NavigateTo","type":"Action","params":{"location":"object_ref"}}
+				],
+				"tree": {
+					"type":"Sequence",
+					"children":[
+						{"type":"Condition","name":"IsAtTarget"},
+						{"type":"Action","name":"NavigateTo","params":{"location":"robot"}}
+					]
+				}
+			}`))
 			Expect(err).NotTo(HaveOccurred())
-			errs := behtree.Validate(env)
-			Expect(errs).To(BeEmpty())
-		})
-	})
-
-	Context("valid desktop environment + outer tree", func() {
-		It("produces no errors", func() {
-			env, err := behtree.LoadEnvironment(
-				"testdata/desktop_env.json",
-				"testdata/desktop_outer.json",
-			)
-			Expect(err).NotTo(HaveOccurred())
+			env := behtree.MergeDocuments(doc)
 			errs := behtree.Validate(env)
 			Expect(errs).To(BeEmpty())
 		})
@@ -105,7 +110,7 @@ var _ = Describe("Validation", func() {
 			env := behtree.MergeDocuments(doc)
 			errs := behtree.Validate(env)
 			Expect(errs).NotTo(BeEmpty())
-			Expect(errs[0].Message).To(ContainSubstring("unknown behaviour"))
+			Expect(errs[0].Message).To(ContainSubstring("unknown action"))
 		})
 
 		It("catches missing children on Sequence", func() {
@@ -119,16 +124,16 @@ var _ = Describe("Validation", func() {
 			Expect(errs[0].Message).To(ContainSubstring("at least one child"))
 		})
 
-		It("catches wrong node type for behaviour", func() {
+		It("rejects condition behaviour definitions", func() {
 			doc, err := behtree.ParseDocument([]byte(`{
 				"behaviours": [{"name":"Foo","type":"Condition"}],
-				"tree": {"type":"Action","name":"Foo"}
+				"tree": {"type":"Condition","name":"Foo"}
 			}`))
 			Expect(err).NotTo(HaveOccurred())
 			env := behtree.MergeDocuments(doc)
 			errs := behtree.Validate(env)
 			Expect(errs).NotTo(BeEmpty())
-			Expect(errs[0].Message).To(ContainSubstring("but used as"))
+			Expect(errs[0].Message).To(ContainSubstring("behaviour type must be Action"))
 		})
 
 		It("catches unknown object reference", func() {
@@ -157,18 +162,16 @@ var _ = Describe("Validation", func() {
 })
 
 var _ = Describe("Pretty Print", func() {
-	It("prints the robot tree matching README format", func() {
-		env, err := behtree.LoadEnvironment("testdata/robot.json")
+	It("prints a PA-BT generated tree", func() {
+		state := robotTestState()
+		result, err := behtree.BuildTree(robotTestGoal(), robotTestActions(), state)
 		Expect(err).NotTo(HaveOccurred())
-		tree := env.Trees[0]
-		output := behtree.PrintTree(tree)
 
+		output := behtree.PrintTree(result.Tree)
 		Expect(output).To(ContainSubstring("Sequence"))
-		Expect(output).To(ContainSubstring("├── Fallback"))
-		Expect(output).To(ContainSubstring("Condition: IsHolding"))
+		Expect(output).To(ContainSubstring("Fallback"))
 		Expect(output).To(ContainSubstring("Action: NavigateTo"))
 		Expect(output).To(ContainSubstring("Action: DropIn"))
-		Expect(output).To(ContainSubstring("└── Action: DropIn"))
 
 		lines := strings.Split(strings.TrimSpace(output), "\n")
 		Expect(lines[0]).To(Equal("Sequence"))
@@ -176,63 +179,27 @@ var _ = Describe("Pretty Print", func() {
 })
 
 var _ = Describe("Interpreter", func() {
-	var (
-		env      *behtree.Environment
-		registry *behtree.BehaviourRegistry
-		state    *behtree.State
-	)
+	Context("PA-BT robot example tick-by-tick", func() {
+		var (
+			result *behtree.BuildResult
+			state  *behtree.State
+		)
 
-	Context("robot example tick-by-tick", func() {
 		BeforeEach(func() {
+			state = robotTestState()
 			var err error
-			env, err = behtree.LoadEnvironment("testdata/robot.json")
+			result, err = behtree.BuildTree(robotTestGoal(), robotTestActions(), state)
 			Expect(err).NotTo(HaveOccurred())
-
-			registry = behtree.NewBehaviourRegistry()
-			state = behtree.NewStateFromEnvironment(env)
-
-			Expect(state.Set("robot", "location", "start")).To(Succeed())
-			Expect(state.Set("robot", "holding", "")).To(Succeed())
-			Expect(state.Set("wrapper", "location", "table")).To(Succeed())
-
-			benchcases.RegisterRobotHandlers(registry)
-		})
-
-		It("completes the task over multiple ticks", func() {
-			tree := env.Trees[0]
-			ip := behtree.NewInterpreter(env, registry, state)
-
-			ip.SetOutcomeRequest(behtree.RequestRunning)
-			status, err := ip.Tick(tree)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(status).To(Equal(behtree.Running))
-
-			robotLoc, _ := state.Get("robot", "location")
-			Expect(robotLoc).To(Equal("start"))
-
-			ip.SetOutcomeRequest(behtree.RequestSuccess)
-			status, err = ip.Tick(tree)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(status).To(Equal(behtree.Success))
-
-			loc, _ := state.Get("robot", "location")
-			Expect(loc).To(Equal("bin"))
-
-			holding, _ := state.Get("robot", "holding")
-			Expect(holding).To(Equal(""))
-
-			wrapperLoc, _ := state.Get("wrapper", "location")
-			Expect(wrapperLoc).To(Equal("bin"))
+			benchcases.RegisterRobotHandlers(result.Registry)
 		})
 
 		It("reaches success when all actions succeed immediately", func() {
-			tree := env.Trees[0]
-			ip := behtree.NewInterpreter(env, registry, state)
+			ip := behtree.NewInterpreter(nil, result.Registry, state)
 			ip.SetOutcomeRequest(behtree.RequestSuccess)
 
 			var finalStatus behtree.Status
-			for i := 0; i < 10; i++ {
-				status, err := ip.Tick(tree)
+			for range 20 {
+				status, err := ip.Tick(result.Tree)
 				Expect(err).NotTo(HaveOccurred())
 				finalStatus = status
 				if status == behtree.Success {
@@ -248,80 +215,48 @@ var _ = Describe("Interpreter", func() {
 })
 
 var _ = Describe("RunTaskTree", func() {
-	It("executes a subtree from state", func() {
+	It("executes a PA-BT inner tree via outer tree composition", func() {
 		env, err := behtree.LoadEnvironment(
-			"testdata/desktop_env.json",
-			"testdata/desktop_outer.json",
+			"testdata/desktop_v2.json",
+			"testdata/desktop_v2_outer.json",
 		)
 		Expect(err).NotTo(HaveOccurred())
 
-		innerDoc, err := behtree.LoadDocument("testdata/desktop_inner.json")
+		// Build inner tree via PA-BT
+		dState := desktopTestState()
+		dActions := desktopTestActions()
+		dGoal := desktopTestGoal()
+
+		innerResult, err := behtree.BuildTree(dGoal, dActions, dState)
 		Expect(err).NotTo(HaveOccurred())
 
-		registry := behtree.NewBehaviourRegistry()
+		// Use environment state (includes all objects) and store inner tree
 		state := behtree.NewStateFromEnvironment(env)
+		Expect(state.Set("task_tree", "tree", innerResult.Tree)).To(Succeed())
 
-		Expect(state.Set("task_tree", "tree", innerDoc.Tree)).To(Succeed())
+		// Start with the PA-BT registry (has condition handlers) and add action handlers
+		registry := innerResult.Registry
+		benchcases.RegisterDesktopInnerHandlers(registry)
+		benchcases.RegisterDesktopOuterHandlers(registry)
 
-		registry.Register("HasTaskTree", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			val, _ := s.Get("task_tree", "tree")
-			if val != nil {
-				return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-			}
-			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
-		})
-
-		registry.Register("HasPendingUtterance", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
-		})
-
-		registry.Register("UserSpeaking", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
-		})
-
-		registry.Register("WaitForSpeech", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Running, Compatible: true}
-		})
-
-		registry.Register("ProcessUtterance", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-		})
-
-		registry.Register("QuerySwayTree", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-		})
-
-		registry.Register("IsAppOpen", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-		})
-
-		registry.Register("IsPageOpen", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-		})
-
-		registry.Register("IsFocused", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-		})
-
-		registry.Register("FocusWindow", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-		})
-
-		registry.Register("OpenApp", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-		})
-
-		registry.Register("OpenURL", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-		})
-
-		tree := env.Trees[0]
+		outerTree := env.Trees[0]
 		ip := behtree.NewInterpreter(env, registry, state)
 		ip.SetOutcomeRequest(behtree.RequestSuccess)
 
-		status, err := ip.Tick(tree)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(status).To(Equal(behtree.Success))
+		var finalStatus behtree.Status
+		for range 20 {
+			status, tickErr := ip.Tick(outerTree)
+			Expect(tickErr).NotTo(HaveOccurred())
+			finalStatus = status
+			if status == behtree.Success {
+				break
+			}
+		}
+		Expect(finalStatus).To(Equal(behtree.Success))
+
+		// Verify the inner tree executed and changed state
+		activePage, _ := state.Get("firefox", "active_page")
+		Expect(activePage).To(Equal(desktopTestURL))
 	})
 })
 

@@ -9,14 +9,23 @@ import (
 type Document struct {
 	Objects    []ObjectDef    `json:"objects,omitempty"`
 	Interfaces []InterfaceDef `json:"interfaces,omitempty"`
-	Behaviours []BehaviourDef `json:"behaviours,omitempty"`
+	Actions    []ActionDef    `json:"actions,omitempty"`
 	Tree       *Node          `json:"tree,omitempty"`
+	Goal       []Condition    `json:"goal,omitempty"`
+
+	// Behaviours supports loading legacy JSON with "behaviours" key.
+	Behaviours []ActionDef `json:"behaviours,omitempty"`
 }
 
 func ParseDocument(data []byte) (*Document, error) {
 	var doc Document
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parse document: %w", err)
+	}
+	// Consolidate legacy behaviours into actions
+	if len(doc.Behaviours) > 0 {
+		doc.Actions = append(doc.Actions, doc.Behaviours...)
+		doc.Behaviours = nil
 	}
 	return &doc, nil
 }
@@ -34,9 +43,12 @@ func MergeDocuments(docs ...*Document) *Environment {
 	for _, doc := range docs {
 		env.Objects = append(env.Objects, doc.Objects...)
 		env.Interfaces = append(env.Interfaces, doc.Interfaces...)
-		env.Behaviours = append(env.Behaviours, doc.Behaviours...)
+		env.Actions = append(env.Actions, doc.Actions...)
 		if doc.Tree != nil {
 			env.Trees = append(env.Trees, doc.Tree)
+		}
+		if len(doc.Goal) > 0 {
+			env.Goal = doc.Goal
 		}
 	}
 	return env

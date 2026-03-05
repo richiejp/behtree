@@ -37,8 +37,7 @@ var _ = Describe("Tracing", func() {
 			Objects: []behtree.ObjectDef{
 				{Name: "worker", Fields: map[string]behtree.FieldType{"status": behtree.FieldString}},
 			},
-			Behaviours: []behtree.BehaviourDef{
-				{Name: "IsReady", Type: behtree.ConditionNode},
+			Actions: []behtree.ActionDef{
 				{Name: "DoWork", Type: behtree.ActionNode, Params: map[string]behtree.ParamType{"target": behtree.ParamString}},
 			},
 			Trees: []*behtree.Node{tree},

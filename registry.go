@@ -31,29 +31,37 @@ type HandlerResult struct {
 
 type Handler func(params Params, state *State, request OutcomeRequest) HandlerResult
 
-type BehaviourRegistry struct {
+type ActionRegistry struct {
 	handlers map[string]Handler
 }
 
-func NewBehaviourRegistry() *BehaviourRegistry {
-	return &BehaviourRegistry{
+// BehaviourRegistry is an alias for backward compatibility.
+type BehaviourRegistry = ActionRegistry
+
+func NewActionRegistry() *ActionRegistry {
+	return &ActionRegistry{
 		handlers: make(map[string]Handler),
 	}
 }
 
-func (r *BehaviourRegistry) Register(name string, h Handler) {
+// NewBehaviourRegistry is an alias for backward compatibility.
+func NewBehaviourRegistry() *ActionRegistry {
+	return NewActionRegistry()
+}
+
+func (r *ActionRegistry) Register(name string, h Handler) {
 	r.handlers[name] = h
 }
 
-func (r *BehaviourRegistry) Get(name string) (Handler, error) {
+func (r *ActionRegistry) Get(name string) (Handler, error) {
 	h, ok := r.handlers[name]
 	if !ok {
-		return nil, fmt.Errorf("no handler registered for behaviour %q", name)
+		return nil, fmt.Errorf("no handler registered for %q", name)
 	}
 	return h, nil
 }
 
-func (r *BehaviourRegistry) Has(name string) bool {
+func (r *ActionRegistry) Has(name string) bool {
 	_, ok := r.handlers[name]
 	return ok
 }

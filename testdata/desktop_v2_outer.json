@@ -1,0 +1,53 @@
+{
+  "tree": {
+    "type": "Fallback",
+    "children": [
+      {
+        "type": "Sequence",
+        "children": [
+          {
+            "type": "Condition",
+            "name": "HasTaskTree"
+          },
+          {
+            "type": "Action",
+            "name": "RunTaskTree",
+            "params": {
+              "tree_variable": "task_tree.tree"
+            }
+          }
+        ]
+      },
+      {
+        "type": "Sequence",
+        "children": [
+          {
+            "type": "Condition",
+            "name": "HasPendingUtterance"
+          },
+          {
+            "type": "Action",
+            "name": "ProcessUtterance"
+          }
+        ]
+      },
+      {
+        "type": "Sequence",
+        "children": [
+          {
+            "type": "Condition",
+            "name": "UserSpeaking"
+          },
+          {
+            "type": "Action",
+            "name": "WaitForSpeech"
+          }
+        ]
+      },
+      {
+        "type": "Action",
+        "name": "WaitForSpeech"
+      }
+    ]
+  }
+}

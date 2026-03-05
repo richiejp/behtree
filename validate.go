@@ -30,23 +30,17 @@ func Validate(env *Environment) []ValidationError {
 		seenIface[i.Name] = true
 	}
 
-	seenBeh := map[string]bool{}
-	for _, b := range env.Behaviours {
-		if seenBeh[b.Name] {
-			errs = append(errs, ValidationError{"behaviours", fmt.Sprintf("duplicate behaviour %q", b.Name)})
+	seenAction := map[string]bool{}
+	for _, a := range env.Actions {
+		if seenAction[a.Name] {
+			errs = append(errs, ValidationError{"actions", fmt.Sprintf("duplicate action %q", a.Name)})
 		}
-		seenBeh[b.Name] = true
+		seenAction[a.Name] = true
 
-		if !b.Type.IsLeaf() {
+		if a.Type != ActionNode {
 			errs = append(errs, ValidationError{
-				fmt.Sprintf("behaviours.%s", b.Name),
-				fmt.Sprintf("behaviour type must be Condition or Action, got %q", b.Type),
-			})
-		}
-		if b.Async && b.Type == ConditionNode {
-			errs = append(errs, ValidationError{
-				fmt.Sprintf("behaviours.%s", b.Name),
-				"conditions cannot be async",
+				fmt.Sprintf("actions.%s", a.Name),
+				fmt.Sprintf("behaviour type must be Action, got %q", a.Type),
 			})
 		}
 	}
@@ -79,15 +73,6 @@ func validateNode(env *Environment, n *Node, path string) []ValidationError {
 			errs = append(errs, validateNode(env, child, childPath)...)
 		}
 
-	case n.Type.IsDecorator():
-		if len(n.Children) != 1 {
-			errs = append(errs, ValidationError{path, fmt.Sprintf("%s decorator must have exactly one child, got %d", n.Type, len(n.Children))})
-		}
-		for i, child := range n.Children {
-			childPath := fmt.Sprintf("%s.children[%d]", path, i)
-			errs = append(errs, validateNode(env, child, childPath)...)
-		}
-
 	case n.Type.IsLeaf():
 		if n.Name == "" {
 			errs = append(errs, ValidationError{path, fmt.Sprintf("%s node must have a name", n.Type)})
@@ -96,14 +81,16 @@ func validateNode(env *Environment, n *Node, path string) []ValidationError {
 			errs = append(errs, ValidationError{path, fmt.Sprintf("%s node must not have children", n.Type)})
 		}
 
-		beh := env.FindBehaviour(n.Name)
-		if beh == nil {
-			errs = append(errs, ValidationError{path, fmt.Sprintf("unknown behaviour %q", n.Name)})
-		} else {
-			if beh.Type != n.Type {
-				errs = append(errs, ValidationError{path, fmt.Sprintf("behaviour %q is %s but used as %s", n.Name, beh.Type, n.Type)})
+		if n.Type == ActionNode {
+			action := env.FindAction(n.Name)
+			if action == nil {
+				errs = append(errs, ValidationError{path, fmt.Sprintf("unknown action %q", n.Name)})
+			} else {
+				if action.Type != n.Type {
+					errs = append(errs, ValidationError{path, fmt.Sprintf("action %q is %s but used as %s", n.Name, action.Type, n.Type)})
+				}
+				errs = append(errs, validateParams(env, action, n.Params, path)...)
 			}
-			errs = append(errs, validateParams(env, beh, n.Params, path)...)
 		}
 
 	default:
@@ -113,24 +100,24 @@ func validateNode(env *Environment, n *Node, path string) []ValidationError {
 	return errs
 }
 
-func validateParams(env *Environment, beh *BehaviourDef, params Params, path string) []ValidationError {
+func validateParams(env *Environment, action *ActionDef, params Params, path string) []ValidationError {
 	var errs []ValidationError
 
 	for name := range params {
-		if _, ok := beh.Params[name]; !ok {
+		if _, ok := action.Params[name]; !ok {
 			errs = append(errs, ValidationError{
 				fmt.Sprintf("%s.params.%s", path, name),
-				fmt.Sprintf("unexpected parameter %q for behaviour %q", name, beh.Name),
+				fmt.Sprintf("unexpected parameter %q for action %q", name, action.Name),
 			})
 		}
 	}
 
-	for name, ptype := range beh.Params {
+	for name, ptype := range action.Params {
 		val, ok := params[name]
 		if !ok {
 			errs = append(errs, ValidationError{
 				fmt.Sprintf("%s.params.%s", path, name),
-				fmt.Sprintf("missing required parameter %q for behaviour %q", name, beh.Name),
+				fmt.Sprintf("missing required parameter %q for action %q", name, action.Name),
 			})
 			continue
 		}

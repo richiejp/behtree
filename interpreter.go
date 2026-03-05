@@ -64,14 +64,6 @@ func (ip *Interpreter) Tick(n *Node) (Status, error) {
 		status, err = ip.tickFallback(n)
 	case ConditionNode, ActionNode:
 		status, err = ip.tickLeaf(n)
-	case InverterNode:
-		status, err = ip.tickInverter(n)
-	case ForceSuccessNode:
-		status, err = ip.tickForceSuccess(n)
-	case ForceFailureNode:
-		status, err = ip.tickForceFailure(n)
-	case RetryUntilSuccessfulNode:
-		status, err = ip.tickRetryUntilSuccessful(n)
 	default:
 		status, err = Failure, fmt.Errorf("unknown node type %q", n.Type)
 	}
@@ -129,64 +121,4 @@ func (ip *Interpreter) tickLeaf(n *Node) (Status, error) {
 		return Failure, fmt.Errorf("handler %q: state incompatible with request %s", n.Name, request)
 	}
 	return result.Status, nil
-}
-
-func (ip *Interpreter) tickInverter(n *Node) (Status, error) {
-	if len(n.Children) != 1 {
-		return Failure, fmt.Errorf("inverter requires exactly 1 child")
-	}
-	status, err := ip.Tick(n.Children[0])
-	if err != nil {
-		return Failure, err
-	}
-	switch status {
-	case Success:
-		return Failure, nil
-	case Failure:
-		return Success, nil
-	default:
-		return status, nil
-	}
-}
-
-func (ip *Interpreter) tickForceSuccess(n *Node) (Status, error) {
-	if len(n.Children) != 1 {
-		return Failure, fmt.Errorf("ForceSuccess requires exactly 1 child")
-	}
-	status, err := ip.Tick(n.Children[0])
-	if err != nil {
-		return Failure, err
-	}
-	if status == Running {
-		return Running, nil
-	}
-	return Success, nil
-}
-
-func (ip *Interpreter) tickForceFailure(n *Node) (Status, error) {
-	if len(n.Children) != 1 {
-		return Failure, fmt.Errorf("ForceFailure requires exactly 1 child")
-	}
-	status, err := ip.Tick(n.Children[0])
-	if err != nil {
-		return Failure, err
-	}
-	if status == Running {
-		return Running, nil
-	}
-	return Failure, nil
-}
-
-func (ip *Interpreter) tickRetryUntilSuccessful(n *Node) (Status, error) {
-	if len(n.Children) != 1 {
-		return Failure, fmt.Errorf("RetryUntilSuccessful requires exactly 1 child")
-	}
-	status, err := ip.Tick(n.Children[0])
-	if err != nil {
-		return Failure, err
-	}
-	if status == Success {
-		return Success, nil
-	}
-	return Running, nil
 }

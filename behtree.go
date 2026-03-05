@@ -33,23 +33,10 @@ const (
 	FallbackNode  NodeType = "Fallback"
 	ConditionNode NodeType = "Condition"
 	ActionNode    NodeType = "Action"
-
-	InverterNode             NodeType = "Inverter"
-	ForceSuccessNode         NodeType = "ForceSuccess"
-	ForceFailureNode         NodeType = "ForceFailure"
-	RetryUntilSuccessfulNode NodeType = "RetryUntilSuccessful"
 )
 
 func (n NodeType) IsControl() bool {
 	return n == SequenceNode || n == FallbackNode
-}
-
-func (n NodeType) IsDecorator() bool {
-	switch n {
-	case InverterNode, ForceSuccessNode, ForceFailureNode, RetryUntilSuccessfulNode:
-		return true
-	}
-	return false
 }
 
 func (n NodeType) IsLeaf() bool {

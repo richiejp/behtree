@@ -1,0 +1,79 @@
+{
+  "objects": [
+    {
+      "name": "sway_state",
+      "fields": {
+        "refreshed": "string"
+      }
+    },
+    {
+      "name": "firefox",
+      "fields": {
+        "open": "string",
+        "active_page": "string"
+      }
+    },
+    {
+      "name": "utterance",
+      "fields": {
+        "text": "string",
+        "processed": "string"
+      }
+    },
+    {
+      "name": "task_tree",
+      "fields": {
+        "tree": "object"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "name": "QuerySwayTree",
+      "type": "Action",
+      "postconditions": [
+        {"object": "sway_state", "field": "refreshed", "value": "true"}
+      ]
+    },
+    {
+      "name": "OpenApp",
+      "type": "Action",
+      "params": {"app": "object_ref"},
+      "preconditions": [
+        {"object": "sway_state", "field": "refreshed", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "$app", "field": "open", "value": "true"}
+      ]
+    },
+    {
+      "name": "OpenURL",
+      "type": "Action",
+      "params": {"app": "object_ref", "url": "string"},
+      "preconditions": [
+        {"object": "$app", "field": "open", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "$app", "field": "active_page", "value": "$url"}
+      ]
+    },
+    {
+      "name": "WaitForSpeech",
+      "type": "Action",
+      "async": true
+    },
+    {
+      "name": "ProcessUtterance",
+      "type": "Action",
+      "async": true
+    },
+    {
+      "name": "RunTaskTree",
+      "type": "Action",
+      "params": {"tree_variable": "string"}
+    }
+  ],
+  "goal": [
+    {"object": "firefox", "field": "active_page", "value": "https://github.com/mudler/LocalAI"}
+  ]
+}

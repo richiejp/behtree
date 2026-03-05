@@ -11,20 +11,17 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 )
 
-// BehTreeGBNF is a GBNF grammar that constrains LLM output to valid
-// behaviour tree JSON. It supports full recursion (unlike JSON Schema
-// workarounds) and produces params as plain {"key": "value"} objects.
-const BehTreeGBNF = `root        ::= "{" ws "\"tree\"" ws ":" ws node ws "}"
-node        ::= "{" ws type-member name-part params-part children-part ws "}"
-type-member ::= "\"type\"" ws ":" ws node-type
-node-type   ::= "\"Sequence\"" | "\"Fallback\"" | "\"Condition\"" | "\"Action\""
-name-part   ::= ( "," ws "\"name\"" ws ":" ws string )?
-params-part ::= ( "," ws "\"params\"" ws ":" ws params )?
-children-part ::= ( "," ws "\"children\"" ws ":" ws "[" ws node-list? ws "]" )?
+// ActionSelectionGBNF constrains LLM output to the action selection format.
+const ActionSelectionGBNF = `root        ::= "{" ws goal-part "," ws actions-part ws "}"
+goal-part   ::= "\"goal\"" ws ":" ws "[" ws cond-list ws "]"
+actions-part ::= "\"actions\"" ws ":" ws "[" ws action-list ws "]"
+cond-list   ::= cond ( "," ws cond )*
+cond        ::= "{" ws "\"object\"" ws ":" ws string "," ws "\"field\"" ws ":" ws string "," ws "\"value\"" ws ":" ws string ws "}"
+action-list ::= action ( "," ws action )*
+action      ::= "{" ws "\"name\"" ws ":" ws string "," ws "\"params\"" ws ":" ws params ws "}"
 params      ::= "{" ws param-list? ws "}"
 param-list  ::= param ( "," ws param )*
 param       ::= string ws ":" ws string
-node-list   ::= node ( "," ws node )*
 string      ::= "\"" chars "\""
 chars       ::= char*
 char        ::= [^"\\] | "\\" escape-char
@@ -32,74 +29,71 @@ escape-char ::= ["\\/bfnrt]
 ws          ::= [ \t\n]*
 `
 
-// GenerateTreeFunc is the signature for a function that generates a
-// behaviour tree from an LLM given a prompt and environment.
+// BehTreeGBNF is kept for backward compatibility with LocalAI provider setup.
+var BehTreeGBNF = ActionSelectionGBNF
+
+// LLMResponse is the expected JSON structure from the LLM.
+type LLMResponse struct {
+	Goal    []behtree.Condition       `json:"goal"`
+	Actions []behtree.ActionSelection `json:"actions"`
+}
+
+// GenerateActionsFunc generates grounded action selections from an LLM.
+type GenerateActionsFunc = func(prompt string, env *behtree.Environment) (*LLMResponse, error)
+
+// GenerateTreeFunc is the legacy signature kept for backward compatibility.
 type GenerateTreeFunc = func(prompt string, env *behtree.Environment) ([]byte, error)
 
-const systemPrompt = `You are an expert at constructing behaviour trees. Generate a behaviour tree in JSON format for the given task.
+const systemPrompt = `You are an expert at robot task planning. Given available actions and a task description, select which actions to execute (with grounded parameters) and specify the goal conditions.
 
-## Node Types
+## Output Format
 
-- **Sequence**: Executes children left to right. SUCCESS if ALL succeed. FAILURE immediately if any child fails. RUNNING if a child returns RUNNING.
-- **Fallback**: Executes children left to right. SUCCESS immediately if any child succeeds. FAILURE if ALL fail. RUNNING if a child returns RUNNING.
-- **Condition**: Leaf node that checks a condition. Returns SUCCESS or FAILURE (never RUNNING). Must reference a defined behaviour by name.
-- **Action**: Leaf node that performs an action. Returns SUCCESS, FAILURE, or RUNNING. Must reference a defined behaviour by name.
+Output a JSON object with two fields:
+- "goal": array of conditions that must be true when the task is complete
+- "actions": array of actions to execute, each with "name" and "params"
 
-## Key Pattern: Check-or-Do with Fallback
+Example:
+{"goal":[{"object":"wrapper","field":"location","value":"bin"}],"actions":[{"name":"NavigateTo","params":{"location":"table"}},{"name":"PickUp","params":{"object":"wrapper"}}]}
 
-Use Fallback to implement "check if already done, otherwise do it":
+## Available Actions
 
-    {
-      "type": "Fallback",
-      "children": [
-        {"type": "Condition", "name": "IsAlreadyDone", "params": {"key": "value"}},
-        {"type": "Action", "name": "DoTheThing", "params": {"key": "value"}}
-      ]
-    }
-
-This ensures the action is only attempted if the condition is not already satisfied. Always prefer this pattern when a precondition must hold before continuing.
-
-## JSON Format
-
-Output a JSON document with a "tree" field containing the root node:
-
-    {"tree": {"type": "Sequence", "children": [...]}}
-
-- Control nodes (Sequence, Fallback): have "type" and "children". No "name" or "params".
-- Leaf nodes (Condition, Action): have "type", "name", and "params". No "children".
-- Parameters with type "object_ref" take the name of an object defined in the environment as their value.
-
-## Environment
-
-The following objects and behaviours are available:
+Each action has parameters (which must reference existing objects), preconditions (what must be true before the action can execute), and postconditions (what becomes true after the action executes).
 
 %s
 
-Generate a behaviour tree for the task described in the user message.`
+## Objects
 
-type envContext struct {
-	Objects    []behtree.ObjectDef    `json:"objects"`
-	Behaviours []behtree.BehaviourDef `json:"behaviours"`
+%s
+
+Select the actions needed to achieve the task described in the user message. Ground each parameter with a specific object name from the environment. Include ALL actions needed, even if some preconditions will be satisfied by earlier actions. Order actions logically (the PA-BT algorithm will construct the correct tree structure).`
+
+type actionDoc struct {
+	Name           string                       `json:"name"`
+	Params         map[string]behtree.ParamType `json:"params,omitempty"`
+	Preconditions  []behtree.Condition          `json:"preconditions,omitempty"`
+	Postconditions []behtree.Condition          `json:"postconditions,omitempty"`
 }
 
-// BuildSystemPrompt constructs the system prompt for tree generation,
-// embedding the environment's objects and behaviours as JSON context.
+// BuildSystemPrompt constructs the system prompt for action grounding.
 func BuildSystemPrompt(env *behtree.Environment) string {
-	ctx := envContext{
-		Objects:    env.Objects,
-		Behaviours: env.Behaviours,
+	var actions []actionDoc
+	for _, a := range env.Actions {
+		actions = append(actions, actionDoc{
+			Name:           a.Name,
+			Params:         a.Params,
+			Preconditions:  a.Preconditions,
+			Postconditions: a.Postconditions,
+		})
 	}
-	data, _ := json.MarshalIndent(ctx, "", "  ")
-	return fmt.Sprintf(systemPrompt, string(data))
+	actionsJSON, _ := json.MarshalIndent(actions, "", "  ")
+	objectsJSON, _ := json.MarshalIndent(env.Objects, "", "  ")
+	return fmt.Sprintf(systemPrompt, string(actionsJSON), string(objectsJSON))
 }
 
-// NewGenerateTree returns a GenerateTreeFunc that uses the given LLM
-// to generate behaviour trees. Grammar-based constraining (for LocalAI)
-// is configured on the client before calling this. For providers without
-// grammar support (Anthropic, OpenAI), the raw response is passed through
-// ExtractJSON to find the JSON object.
-func NewGenerateTree(llm cogito.LLM, model string, verbose bool) GenerateTreeFunc {
-	return func(prompt string, env *behtree.Environment) ([]byte, error) {
+// NewGenerateActions returns a function that uses the given LLM to generate
+// action selections for the PA-BT pipeline.
+func NewGenerateActions(llm cogito.LLM, model string, verbose bool) GenerateActionsFunc {
+	return func(prompt string, env *behtree.Environment) (*LLMResponse, error) {
 		sysPrompt := BuildSystemPrompt(env)
 
 		req := openai.ChatCompletionRequest{
@@ -137,7 +131,29 @@ func NewGenerateTree(llm cogito.LLM, model string, verbose bool) GenerateTreeFun
 
 		content = ExtractJSON(content)
 
-		return []byte(content), nil
+		var resp LLMResponse
+		if err := json.Unmarshal([]byte(content), &resp); err != nil {
+			return nil, fmt.Errorf("parse LLM response: %w", err)
+		}
+
+		return &resp, nil
+	}
+}
+
+// NewGenerateTree wraps NewGenerateActions to return raw JSON bytes for
+// backward compatibility with the benchmark framework.
+func NewGenerateTree(llm cogito.LLM, model string, verbose bool) GenerateTreeFunc {
+	genActions := NewGenerateActions(llm, model, verbose)
+	return func(prompt string, env *behtree.Environment) ([]byte, error) {
+		resp, err := genActions(prompt, env)
+		if err != nil {
+			return nil, err
+		}
+		data, err := json.Marshal(resp)
+		if err != nil {
+			return nil, fmt.Errorf("marshal LLM response: %w", err)
+		}
+		return data, nil
 	}
 }
 
@@ -146,12 +162,10 @@ func NewGenerateTree(llm cogito.LLM, model string, verbose bool) GenerateTreeFun
 func ExtractJSON(s string) string {
 	s = strings.TrimSpace(s)
 
-	// Already valid JSON
 	if json.Valid([]byte(s)) {
 		return s
 	}
 
-	// Try markdown ```json ... ``` blocks
 	if idx := strings.Index(s, "```json"); idx >= 0 {
 		start := idx + len("```json")
 		if end := strings.Index(s[start:], "```"); end >= 0 {
@@ -171,7 +185,6 @@ func ExtractJSON(s string) string {
 		}
 	}
 
-	// Try outermost { ... }
 	first := strings.IndexByte(s, '{')
 	last := strings.LastIndexByte(s, '}')
 	if first >= 0 && last > first {

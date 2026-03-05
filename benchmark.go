@@ -2,6 +2,7 @@ package behtree
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 )
@@ -43,7 +44,7 @@ type BenchmarkCase struct {
 	Environment *Environment
 	Prompt      string
 	Validate    func(tree *Node, env *Environment) []ValidationError
-	Simulate    func(tree *Node, env *Environment, registry *BehaviourRegistry, opts SimulateOptions) []*ScenarioResult
+	Simulate    func(tree *Node, env *Environment, registry *ActionRegistry, opts SimulateOptions) []*ScenarioResult
 }
 
 type BenchmarkResult struct {
@@ -89,6 +90,7 @@ func (s *BenchmarkSuite) Add(c *BenchmarkCase) {
 	s.Cases = append(s.Cases, c)
 }
 
+// EvalTree evaluates a pre-built tree against a benchmark case.
 func (s *BenchmarkSuite) EvalTree(bc *BenchmarkCase, tree *Node) *BenchmarkResult {
 	result := &BenchmarkResult{
 		Case:          bc,
@@ -112,7 +114,7 @@ func (s *BenchmarkSuite) EvalTree(bc *BenchmarkCase, tree *Node) *BenchmarkResul
 	}
 
 	if bc.Simulate != nil {
-		registry := NewBehaviourRegistry()
+		registry := NewActionRegistry()
 		result.Scenarios = bc.Simulate(tree, env, registry, s.SimulateOpts)
 	}
 
@@ -133,6 +135,53 @@ func (s *BenchmarkSuite) EvalTree(bc *BenchmarkCase, tree *Node) *BenchmarkResul
 	return result
 }
 
+// EvalPABT evaluates action selections through the PA-BT pipeline.
+func (s *BenchmarkSuite) EvalPABT(bc *BenchmarkCase, selections []ActionSelection, goalConds []Condition) *BenchmarkResult {
+	result := &BenchmarkResult{Case: bc}
+
+	grounded, err := GroundActions(bc.Environment, selections)
+	if err != nil {
+		result.ParseError = fmt.Errorf("ground actions: %w", err)
+		return result
+	}
+
+	goal, err := ResolveGoal(goalConds)
+	if err != nil {
+		result.ParseError = fmt.Errorf("resolve goal: %w", err)
+		return result
+	}
+
+	state := NewStateFromEnvironment(bc.Environment)
+	buildResult, err := BuildTree(goal, grounded, state)
+	if err != nil {
+		result.ParseError = fmt.Errorf("build tree: %w", err)
+		return result
+	}
+
+	result.GeneratedTree = buildResult.Tree
+
+	if bc.Simulate != nil {
+		result.Scenarios = bc.Simulate(buildResult.Tree, bc.Environment, buildResult.Registry, s.SimulateOpts)
+	}
+
+	result.Passed = true
+	if result.Scenarios != nil {
+		for _, sr := range result.Scenarios {
+			if sr.Skipped {
+				continue
+			}
+			lastTick := sr.Ticks[len(sr.Ticks)-1]
+			if lastTick.Err != nil || lastTick.Status == Failure {
+				result.Passed = false
+				break
+			}
+		}
+	}
+
+	return result
+}
+
+// Run executes the benchmark suite using the old tree-generation pipeline.
 func (s *BenchmarkSuite) Run(generateTree func(prompt string, env *Environment) ([]byte, error)) []*BenchmarkResult {
 	var results []*BenchmarkResult
 

@@ -80,18 +80,18 @@ func PrintEnvironment(env *Environment, w io.Writer) {
 			}
 		}
 	}
-	if len(env.Behaviours) > 0 {
-		_, _ = fmt.Fprintln(w, "Behaviours:")
-		for _, b := range env.Behaviours {
+	if len(env.Actions) > 0 {
+		_, _ = fmt.Fprintln(w, "Actions:")
+		for _, a := range env.Actions {
 			params := ""
-			if len(b.Params) > 0 {
-				parts := make([]string, 0, len(b.Params))
-				for name, ptype := range b.Params {
+			if len(a.Params) > 0 {
+				parts := make([]string, 0, len(a.Params))
+				for name, ptype := range a.Params {
 					parts = append(parts, fmt.Sprintf("%s: %s", name, ptype))
 				}
 				params = "(" + strings.Join(parts, ", ") + ")"
 			}
-			_, _ = fmt.Fprintf(w, "  [%s] %s%s\n", b.Type, b.Name, params)
+			_, _ = fmt.Fprintf(w, "  [%s] %s%s\n", a.Type, a.Name, params)
 		}
 	}
 }

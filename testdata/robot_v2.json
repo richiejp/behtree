@@ -1,0 +1,69 @@
+{
+  "objects": [
+    {
+      "name": "wrapper",
+      "fields": {
+        "type": "string",
+        "location": "string"
+      }
+    },
+    {
+      "name": "table",
+      "fields": {
+        "type": "string"
+      }
+    },
+    {
+      "name": "bin",
+      "fields": {
+        "type": "string"
+      }
+    },
+    {
+      "name": "robot",
+      "fields": {
+        "location": "string",
+        "holding": "string"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "name": "NavigateTo",
+      "type": "Action",
+      "params": {"location": "object_ref"},
+      "async": true,
+      "postconditions": [
+        {"object": "robot", "field": "location", "value": "$location"}
+      ]
+    },
+    {
+      "name": "PickUp",
+      "type": "Action",
+      "params": {"object": "object_ref"},
+      "preconditions": [
+        {"object": "robot", "field": "location", "value": "$object.location"},
+        {"object": "robot", "field": "holding", "value": ""}
+      ],
+      "postconditions": [
+        {"object": "robot", "field": "holding", "value": "$object"}
+      ]
+    },
+    {
+      "name": "DropIn",
+      "type": "Action",
+      "params": {"object": "object_ref", "container": "object_ref"},
+      "preconditions": [
+        {"object": "robot", "field": "holding", "value": "$object"},
+        {"object": "robot", "field": "location", "value": "$container"}
+      ],
+      "postconditions": [
+        {"object": "robot", "field": "holding", "value": ""},
+        {"object": "$object", "field": "location", "value": "$container"}
+      ]
+    }
+  ],
+  "goal": [
+    {"object": "wrapper", "field": "location", "value": "bin"}
+  ]
+}
