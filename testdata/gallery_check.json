@@ -1,0 +1,85 @@
+{
+  "objects": [
+    {
+      "name": "gallery",
+      "fields": {
+        "scanned": "string"
+      }
+    },
+    {
+      "name": "model_check",
+      "fields": {
+        "loaded": "string",
+        "info_fetched": "string",
+        "files_verified": "string"
+      }
+    },
+    {
+      "name": "system",
+      "fields": {
+        "idle": "string"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "name": "ScanGallery",
+      "type": "Action",
+      "postconditions": [
+        {"object": "gallery", "field": "scanned", "value": "true"},
+        {"object": "model_check", "field": "loaded", "value": "true"}
+      ]
+    },
+    {
+      "name": "FetchModelInfo",
+      "type": "Action",
+      "async": true,
+      "preconditions": [
+        {"object": "model_check", "field": "loaded", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "model_check", "field": "info_fetched", "value": "true"}
+      ]
+    },
+    {
+      "name": "VerifyFiles",
+      "type": "Action",
+      "async": true,
+      "preconditions": [
+        {"object": "model_check", "field": "loaded", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "model_check", "field": "files_verified", "value": "true"}
+      ]
+    },
+    {
+      "name": "SynthesizeUpdate",
+      "type": "Action",
+      "async": true,
+      "preconditions": [
+        {"object": "model_check", "field": "info_fetched", "value": "true"},
+        {"object": "model_check", "field": "files_verified", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "model_check", "field": "loaded", "value": "false"},
+        {"object": "model_check", "field": "info_fetched", "value": "false"},
+        {"object": "model_check", "field": "files_verified", "value": "false"}
+      ]
+    },
+    {
+      "name": "Idle",
+      "type": "Action",
+      "preconditions": [
+        {"object": "gallery", "field": "scanned", "value": "true"},
+        {"object": "model_check", "field": "loaded", "value": "false"}
+      ],
+      "postconditions": [
+        {"object": "system", "field": "idle", "value": "true"}
+      ]
+    }
+  ],
+  "goal": [
+    {"object": "gallery", "field": "scanned", "value": "true"},
+    {"object": "system", "field": "idle", "value": "true"}
+  ]
+}

@@ -1,0 +1,7 @@
+[
+  {"name": "ScanGallery", "params": {}},
+  {"name": "FetchModelInfo", "params": {}},
+  {"name": "VerifyFiles", "params": {}},
+  {"name": "SynthesizeUpdate", "params": {}},
+  {"name": "Idle", "params": {}}
+]
