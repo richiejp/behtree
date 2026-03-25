@@ -3,6 +3,7 @@ package galcheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -18,27 +19,57 @@ import (
 // Config holds configuration for the gallery check handlers.
 type Config struct {
 	GalleryPath string
+	OutputDir   string // per-model output directory (enables resume)
 	HF          *HFClient
 	LLM         cogito.LLM // optional: LLM for synthesizing descriptions/tags
 	LLMModel    string     // model name for chat completion requests
 	MaxAge      time.Duration
-	Limit       int  // max models to check (0 = unlimited)
-	DryRun      bool // just scan, don't fetch/verify
+	Timeout     time.Duration // timeout for LLM and HF API calls
+	Limit       int           // max models to check (0 = unlimited)
+	DryRun      bool          // just scan, don't fetch/verify
 	Verbose     bool
-	Reports     []*ModelReport // accumulated reports
-	checked     int            // count of models processed
-	processed   map[int]bool   // entry indices already processed this session
-	gallery     []GalleryEntry // cached gallery entries (loaded once)
+	Reports     []*ModelReport  // accumulated reports
+	checked     int             // count of models processed
+	processed   map[string]bool // model names already processed
+	gallery     []GalleryEntry  // cached gallery entries (loaded once)
 }
 
 // RegisterHandlers registers all gallery check action handlers on the registry.
 func RegisterHandlers(registry *behtree.ActionRegistry, cfg *Config) {
-	cfg.processed = make(map[int]bool)
+	cfg.processed = make(map[string]bool)
 	registry.Register("ScanGallery", scanGalleryHandler(cfg))
 	registry.Register("FetchModelInfo", fetchModelInfoHandler(cfg))
 	registry.Register("VerifyFiles", verifyFilesHandler(cfg))
 	registry.Register("SynthesizeUpdate", synthesizeUpdateHandler(cfg))
 	registry.Register("Idle", idleHandler(cfg))
+}
+
+// ResumeFromDir loads existing reports from the output directory and
+// pre-populates the processed map so those models are skipped.
+func ResumeFromDir(cfg *Config) error {
+	reports, err := LoadReports(cfg.OutputDir)
+	if err != nil {
+		return fmt.Errorf("resume: %w", err)
+	}
+	for _, r := range reports {
+		cfg.processed[r.Name] = true
+		cfg.checked++
+		// Add to in-memory reports for summary
+		cfg.Reports = append(cfg.Reports, &ModelReport{
+			Name:          r.Name,
+			EntryIndex:    r.EntryIndex,
+			HFRepo:        r.HFRepo,
+			Findings:      r.Findings,
+			FileResults:   r.FileResults,
+			SafetyOK:      r.SafetyOK,
+			SafetyNote:    r.SafetyNote,
+			ProposedEntry: r.ProposedEntry,
+		})
+	}
+	if cfg.Verbose && len(reports) > 0 {
+		log.Printf("Resumed: %d models already processed", len(reports))
+	}
+	return nil
 }
 
 func scanGalleryHandler(cfg *Config) behtree.Handler {
@@ -66,7 +97,7 @@ func scanGalleryHandler(cfg *Config) behtree.Handler {
 			entries, err := LoadGallery(cfg.GalleryPath)
 			if err != nil {
 				log.Printf("ScanGallery: %v", err)
-				return behtree.HandlerResult{Status: behtree.Failure, Compatible: false}
+				return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 			}
 			cfg.gallery = entries
 		}
@@ -74,7 +105,7 @@ func scanGalleryHandler(cfg *Config) behtree.Handler {
 
 		// Find first entry needing check (skip already processed this session)
 		for i, entry := range entries {
-			if cfg.processed[i] {
+			if cfg.processed[entry.Name] {
 				continue
 			}
 			if !NeedsCheck(&entry, cfg.MaxAge) {
@@ -138,8 +169,14 @@ func fetchModelInfoHandler(cfg *Config) behtree.Handler {
 		// Fetch model metadata from HF API
 		info, err := cfg.HF.GetModelInfo(repoID)
 		if err != nil {
+			var httpErr *HTTPError
+			if errors.As(err, &httpErr) && httpErr.StatusCode == 401 {
+				log.Printf("FetchModelInfo: %s inaccessible (HTTP 401), marking for deletion", name)
+				markForDeletion(cfg, s, repoID, "HF repo returned 401 (private or removed)")
+				return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+			}
 			log.Printf("FetchModelInfo: %v", err)
-			return behtree.HandlerResult{Status: behtree.Failure, Compatible: false}
+			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 		}
 
 		infoJSON, _ := json.Marshal(info)
@@ -208,7 +245,7 @@ func verifyFilesHandler(cfg *Config) behtree.Handler {
 		var entry GalleryEntry
 		if err := json.Unmarshal([]byte(entryJSON.(string)), &entry); err != nil {
 			log.Printf("VerifyFiles: parse entry: %v", err)
-			return behtree.HandlerResult{Status: behtree.Failure, Compatible: false}
+			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 		}
 
 		// Load HF file SHAs
@@ -347,18 +384,15 @@ func synthesizeUpdateHandler(cfg *Config) behtree.Handler {
 			suggestion, llmErr := callLLM(cfg, &entry, modelCard, &hfInfo)
 			if llmErr != nil {
 				log.Printf("SynthesizeUpdate: LLM call failed: %v", llmErr)
-				// Non-fatal: fall back to automated checks
-			} else {
-				llmSuggestion = suggestion
+				return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 			}
+			llmSuggestion = suggestion
 		}
 
-		// Generate findings (automated + LLM-assisted if available)
-		report.Findings = generateFindings(&entry, &hfInfo, cfg.DryRun, llmSuggestion)
+		// Generate findings and proposed entry (automated + LLM-assisted if available)
+		report.Findings, report.ProposedEntry = generateFindings(&entry, &hfInfo, cfg.DryRun, llmSuggestion)
 
-		cfg.Reports = append(cfg.Reports, report)
-		cfg.checked++
-		cfg.processed[report.EntryIndex] = true
+		recordReport(cfg, report, &entry)
 
 		if cfg.Verbose {
 			log.Printf("SynthesizeUpdate: report generated for %s (%d findings)", name, len(report.Findings))
@@ -370,6 +404,60 @@ func synthesizeUpdateHandler(cfg *Config) behtree.Handler {
 		_ = s.Set("model_check", "files_verified", "false")
 
 		return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+	}
+}
+
+// markForDeletion creates a report recommending removal of the current model,
+// then clears model_check state so the next model can be processed.
+func markForDeletion(cfg *Config, s *behtree.State, hfRepo, reason string) {
+	entryJSON, _ := s.Get("model_check", "current_entry")
+	var entry GalleryEntry
+	_ = json.Unmarshal([]byte(entryJSON.(string)), &entry)
+
+	entryIdx, _ := s.Get("model_check", "entry_index")
+
+	report := &ModelReport{
+		Name:       entry.Name,
+		EntryIndex: entryIdx.(int),
+		HFRepo:     hfRepo,
+		Findings: []Finding{{
+			Field:    "Delete",
+			Current:  "present",
+			Proposed: "remove",
+			Source:   reason,
+		}},
+		SafetyOK:      true,
+		ProposedEntry: nil, // nil signals deletion
+	}
+
+	recordReport(cfg, report, &entry)
+
+	_ = s.Set("model_check", "loaded", "false")
+	_ = s.Set("model_check", "info_fetched", "false")
+	_ = s.Set("model_check", "files_verified", "false")
+}
+
+func recordReport(cfg *Config, report *ModelReport, original *GalleryEntry) {
+	cfg.Reports = append(cfg.Reports, report)
+	cfg.checked++
+	cfg.processed[report.Name] = true
+
+	if cfg.OutputDir != "" {
+		pr := &PersistentReport{
+			Name:          report.Name,
+			EntryIndex:    report.EntryIndex,
+			HFRepo:        report.HFRepo,
+			Findings:      report.Findings,
+			FileResults:   report.FileResults,
+			SafetyOK:      report.SafetyOK,
+			SafetyNote:    report.SafetyNote,
+			OriginalEntry: original,
+			ProposedEntry: report.ProposedEntry,
+			CheckedAt:     time.Now().Format("2006-01-02"),
+		}
+		if err := WriteReportFiles(cfg.OutputDir, pr); err != nil {
+			log.Printf("SynthesizeUpdate: write report files: %v", err)
+		}
 	}
 }
 
@@ -389,24 +477,30 @@ func idleHandler(cfg *Config) behtree.Handler {
 	}
 }
 
-// generateFindings compares current entry metadata against HF metadata.
-// If llm is non-nil, uses LLM suggestions for tags, description, and usecases.
-func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LLMSuggestion) []Finding {
+// generateFindings compares current entry metadata against HF metadata and
+// builds a proposed entry with all changes applied. If llm is non-nil, uses
+// LLM suggestions for tags, description, and usecases.
+func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LLMSuggestion) ([]Finding, *GalleryEntry) {
 	var findings []Finding
 
+	// Deep-copy entry via JSON round-trip
+	proposed := cloneEntry(entry)
+
 	if dryRun {
+		proposed.LastChecked = time.Now().Format("2006-01-02")
 		findings = append(findings, Finding{
 			Field:    "last_checked",
 			Current:  entry.LastChecked,
-			Proposed: time.Now().Format("2006-01-02"),
+			Proposed: proposed.LastChecked,
 			Source:   "scan",
 		})
-		return findings
+		return findings, proposed
 	}
 
 	// License
 	hfLicense := ExtractLicense(hf.Tags)
 	if hfLicense != "" && entry.License != hfLicense {
+		proposed.License = hfLicense
 		findings = append(findings, Finding{
 			Field:    "License",
 			Current:  entry.License,
@@ -423,16 +517,21 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 		}
 	}
 	if desc == "" || strings.HasPrefix(desc, "Imported from") {
-		proposed := "(needs model card summary)"
+		proposedDesc := "(needs model card summary)"
 		source := "model card"
 		if llm != nil && llm.Description != "" {
-			proposed = llm.Description
+			proposedDesc = llm.Description
 			source = "LLM from model card"
+		}
+		proposed.Description = proposedDesc
+		// Clear overrides description if we're setting top-level
+		if proposed.Overrides != nil {
+			delete(proposed.Overrides, "description")
 		}
 		findings = append(findings, Finding{
 			Field:    "Description",
 			Current:  truncateStr(desc, 60),
-			Proposed: proposed,
+			Proposed: proposedDesc,
 			Source:   source,
 		})
 	}
@@ -440,6 +539,7 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 	// Tags — always review when LLM is available, fallback to HF for empty/default
 	if llm != nil && len(llm.Tags) > 0 {
 		if !sameStringSet(entry.Tags, llm.Tags) {
+			proposed.Tags = llm.Tags
 			findings = append(findings, Finding{
 				Field:    "Tags",
 				Current:  fmt.Sprintf("%v", entry.Tags),
@@ -448,12 +548,13 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 			})
 		}
 	} else if len(entry.Tags) == 0 || hasOnlyDefaultTags(entry.Tags) {
-		proposed := suggestTags(hf)
-		if len(proposed) > 0 {
+		suggestedTags := suggestTags(hf)
+		if len(suggestedTags) > 0 {
+			proposed.Tags = suggestedTags
 			findings = append(findings, Finding{
 				Field:    "Tags",
 				Current:  fmt.Sprintf("%v", entry.Tags),
-				Proposed: fmt.Sprintf("%v", proposed),
+				Proposed: fmt.Sprintf("%v", suggestedTags),
 				Source:   "HF metadata",
 			})
 		}
@@ -470,6 +571,15 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 			}
 		}
 		if !sameStringSet(current, llm.KnownUsecases) {
+			if proposed.Overrides == nil {
+				proposed.Overrides = make(map[string]any)
+			}
+			// Store as []any for YAML compatibility
+			usecaseAny := make([]any, len(llm.KnownUsecases))
+			for i, u := range llm.KnownUsecases {
+				usecaseAny[i] = u
+			}
+			proposed.Overrides["known_usecases"] = usecaseAny
 			findings = append(findings, Finding{
 				Field:    "known_usecases",
 				Current:  fmt.Sprintf("%v", current),
@@ -481,23 +591,34 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 
 	// Icon
 	if entry.Icon == "" && hf.Author != "" {
+		iconURL := fmt.Sprintf("https://cdn-avatars.huggingface.co/v1/production/uploads/%s", hf.Author)
+		proposed.Icon = iconURL
 		findings = append(findings, Finding{
 			Field:    "Icon",
 			Current:  "",
-			Proposed: fmt.Sprintf("https://cdn-avatars.huggingface.co/v1/production/uploads/%s", hf.Author),
+			Proposed: iconURL,
 			Source:   "HF author avatar",
 		})
 	}
 
 	// Last checked
+	proposed.LastChecked = time.Now().Format("2006-01-02")
 	findings = append(findings, Finding{
 		Field:    "last_checked",
 		Current:  entry.LastChecked,
-		Proposed: time.Now().Format("2006-01-02"),
+		Proposed: proposed.LastChecked,
 		Source:   "scan",
 	})
 
-	return findings
+	return findings, proposed
+}
+
+// cloneEntry deep-copies a GalleryEntry via JSON round-trip.
+func cloneEntry(entry *GalleryEntry) *GalleryEntry {
+	data, _ := json.Marshal(entry)
+	var clone GalleryEntry
+	_ = json.Unmarshal(data, &clone)
+	return &clone
 }
 
 // sameStringSet returns true if a and b contain the same elements (order-independent).
@@ -683,7 +804,14 @@ Backend: %s
 		},
 	}
 
-	reply, usage, err := cfg.LLM.CreateChatCompletion(context.Background(), req)
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	reply, usage, err := cfg.LLM.CreateChatCompletion(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("LLM call: %w", err)
 	}

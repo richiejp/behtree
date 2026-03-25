@@ -1,38 +1,42 @@
 package galcheck
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
 type Finding struct {
-	Field    string
-	Current  string
-	Proposed string
-	Source   string // e.g., "HF metadata", "model card", "file check"
+	Field    string `json:"field"`
+	Current  string `json:"current"`
+	Proposed string `json:"proposed"`
+	Source   string `json:"source"` // e.g., "HF metadata", "model card", "file check"
 }
 
 type FileCheckResult struct {
-	Filename    string
-	URI         string
-	SHAMatch    bool
-	Accessible  bool
-	ExpectedSHA string
-	ActualSHA   string
-	StatusCode  int
-	Error       string
+	Filename    string `json:"filename"`
+	URI         string `json:"uri"`
+	SHAMatch    bool   `json:"sha_match"`
+	Accessible  bool   `json:"accessible"`
+	ExpectedSHA string `json:"expected_sha"`
+	ActualSHA   string `json:"actual_sha"`
+	StatusCode  int    `json:"status_code"`
+	Error       string `json:"error,omitempty"`
 }
 
 type ModelReport struct {
-	Name          string
-	EntryIndex    int
-	HFRepo        string
-	Findings      []Finding
-	FileResults   []FileCheckResult
-	SafetyOK      bool
-	SafetyNote    string
-	ProposedEntry *GalleryEntry // the updated entry if changes are needed
+	Name          string            `json:"name"`
+	EntryIndex    int               `json:"entry_index"`
+	HFRepo        string            `json:"hf_repo"`
+	Findings      []Finding         `json:"findings"`
+	FileResults   []FileCheckResult `json:"file_results"`
+	SafetyOK      bool              `json:"safety_ok"`
+	SafetyNote    string            `json:"safety_note,omitempty"`
+	ProposedEntry *GalleryEntry     `json:"proposed_entry,omitempty"`
 }
 
 func (r *ModelReport) HasChanges() bool {
@@ -161,4 +165,104 @@ func ExtractLicense(tags []string) string {
 		}
 	}
 	return ""
+}
+
+// PersistentReport is the on-disk format for a per-model report.
+type PersistentReport struct {
+	Name          string            `json:"name"`
+	EntryIndex    int               `json:"entry_index"`
+	HFRepo        string            `json:"hf_repo"`
+	Findings      []Finding         `json:"findings"`
+	FileResults   []FileCheckResult `json:"file_results"`
+	SafetyOK      bool              `json:"safety_ok"`
+	SafetyNote    string            `json:"safety_note,omitempty"`
+	OriginalEntry *GalleryEntry     `json:"original_entry"`
+	ProposedEntry *GalleryEntry     `json:"proposed_entry"`
+	CheckedAt     string            `json:"checked_at"`
+}
+
+// SanitizeFilename makes a model name safe for use as a filename.
+func SanitizeFilename(name string) string {
+	r := strings.NewReplacer("/", "_", "\\", "_", " ", "_", ":", "_")
+	return r.Replace(name)
+}
+
+// WriteReportFiles writes a .json and .md report file atomically to dir.
+func WriteReportFiles(dir string, report *PersistentReport) error {
+	base := SanitizeFilename(report.Name)
+
+	// Write JSON
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal report: %w", err)
+	}
+	if err := atomicWrite(filepath.Join(dir, base+".json"), data); err != nil {
+		return fmt.Errorf("write json: %w", err)
+	}
+
+	// Write markdown
+	var buf bytes.Buffer
+	mr := &ModelReport{
+		Name:          report.Name,
+		EntryIndex:    report.EntryIndex,
+		HFRepo:        report.HFRepo,
+		Findings:      report.Findings,
+		FileResults:   report.FileResults,
+		SafetyOK:      report.SafetyOK,
+		SafetyNote:    report.SafetyNote,
+		ProposedEntry: report.ProposedEntry,
+	}
+	WriteReport(&buf, mr)
+	if err := atomicWrite(filepath.Join(dir, base+".md"), buf.Bytes()); err != nil {
+		return fmt.Errorf("write md: %w", err)
+	}
+
+	return nil
+}
+
+func atomicWrite(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+
+	return os.Rename(tmpPath, path)
+}
+
+// LoadReports reads all .json report files from a directory.
+func LoadReports(dir string) ([]*PersistentReport, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read dir: %w", err)
+	}
+
+	var reports []*PersistentReport
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", e.Name(), err)
+		}
+		var report PersistentReport
+		if err := json.Unmarshal(data, &report); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", e.Name(), err)
+		}
+		reports = append(reports, &report)
+	}
+
+	return reports, nil
 }

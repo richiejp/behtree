@@ -48,6 +48,6 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  plan        Run PA-BT algorithm on environment, print tree")
 	fmt.Fprintln(os.Stderr, "  show        Display environment and tree from JSON files")
 	fmt.Fprintln(os.Stderr, "  trace       Query and display trace files")
-	fmt.Fprintln(os.Stderr, "  gallery-check  Check gallery model metadata against HuggingFace")
+	fmt.Fprintln(os.Stderr, "  gallery-check  Check/apply gallery model metadata (resumable)")
 	fmt.Fprintln(os.Stderr, "  help        Show this help")
 }

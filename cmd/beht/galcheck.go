@@ -18,12 +18,16 @@ func runGalleryCheck() {
 	galleryPath := flags.String("gallery-path", "", "Path to gallery index.yaml (required)")
 	envPath := flags.String("env", "testdata/gallery_check.json", "Path to environment JSON")
 	actionsPath := flags.String("actions", "testdata/gallery_check_actions.json", "Path to actions JSON")
-	output := flags.String("output", "", "Output report file (default: stdout)")
+	output := flags.String("output", "", "Output summary file (default: stdout)")
+	outputDir := flags.String("output-dir", "", "Directory for per-model report files (enables resume)")
+	apply := flags.Bool("apply", false, "Apply approved reports from output-dir to gallery YAML")
 	limit := flags.Int("limit", 0, "Max models to check (0 = unlimited)")
 	maxAgeDays := flags.Int("max-age", 90, "Max days since last check before re-checking")
 	dryRun := flags.Bool("dry-run", false, "Scan only, don't fetch or verify")
 	verbose := flags.Bool("verbose", false, "Print detailed progress")
 	maxTicks := flags.Int("max-ticks", 1000, "Max interpreter ticks before stopping")
+	maxDelay := flags.Int("max-delay", 7, "Max backoff delay in seconds on repeated failures")
+	timeoutSecs := flags.Int("timeout", 30, "Timeout in seconds for LLM and HF API calls")
 
 	// LLM flags for tag/description synthesis
 	model := flags.String("model", "", "LLM model name for metadata synthesis (optional)")
@@ -31,17 +35,21 @@ func runGalleryCheck() {
 	baseURL := flags.String("base-url", "", "LLM API base URL (env: BASE_URL)")
 	provider := flags.String("provider", "openai", "LLM provider: openai or localai")
 
+	flags.Usage = func() { printGalleryCheckUsage(flags) }
+
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		os.Exit(1)
 	}
 
-	if *galleryPath == "" {
-		fmt.Fprintln(os.Stderr, "Usage: beht gallery-check -gallery-path <index.yaml> [flags]")
-		fmt.Fprintln(os.Stderr, "  Checks gallery model metadata against HuggingFace, generates a report.")
-		fmt.Fprintln(os.Stderr, "  Add -model <name> to enable LLM-assisted tag/description suggestions.")
-		fmt.Fprintln(os.Stderr)
-		flags.PrintDefaults()
+	if *galleryPath == "" && !*apply {
+		printGalleryCheckUsage(flags)
 		os.Exit(1)
+	}
+
+	// Apply mode: skip BT setup, just apply reports to gallery
+	if *apply {
+		runGalleryApply(*galleryPath, *outputDir, *verbose)
+		return
 	}
 
 	// Resolve env vars for LLM config
@@ -102,10 +110,13 @@ func runGalleryCheck() {
 	registry := behtree.NewActionRegistry()
 	registry.Merge(result.Registry)
 
+	timeout := time.Duration(*timeoutSecs) * time.Second
 	cfg := &galcheck.Config{
 		GalleryPath: *galleryPath,
-		HF:          galcheck.NewHFClient(),
+		OutputDir:   *outputDir,
+		HF:          galcheck.NewHFClient(timeout),
 		MaxAge:      time.Duration(*maxAgeDays) * 24 * time.Hour,
+		Timeout:     timeout,
 		Limit:       *limit,
 		DryRun:      *dryRun,
 		Verbose:     *verbose,
@@ -129,6 +140,16 @@ func runGalleryCheck() {
 
 	galcheck.RegisterHandlers(registry, cfg)
 
+	// Resume from output directory if it exists
+	if *outputDir != "" {
+		if err := os.MkdirAll(*outputDir, 0o755); err != nil {
+			log.Fatalf("create output dir: %v", err)
+		}
+		if err := galcheck.ResumeFromDir(cfg); err != nil {
+			log.Fatalf("resume: %v", err)
+		}
+	}
+
 	// Create interpreter and run tick loop
 	interp := behtree.NewInterpreter(env, registry, runtimeState)
 
@@ -137,6 +158,7 @@ func runGalleryCheck() {
 			*galleryPath, *limit, *maxAgeDays, *dryRun)
 	}
 
+	var consecutiveFailures uint
 	for tick := 0; tick < *maxTicks; tick++ {
 		prevChecked := len(cfg.Reports)
 
@@ -150,6 +172,7 @@ func runGalleryCheck() {
 		}
 
 		if status == behtree.Success {
+			consecutiveFailures = 0
 			if len(cfg.Reports) > prevChecked {
 				// A model was processed this tick; there might be more.
 				// Continue ticking so ScanGallery can find the next one.
@@ -160,16 +183,20 @@ func runGalleryCheck() {
 		}
 
 		if status == behtree.Failure {
+			consecutiveFailures++
+			delay := backoff(consecutiveFailures, time.Duration(*maxDelay)*time.Second)
 			if *verbose {
-				log.Printf("tick %d: failure, retrying...", tick)
+				log.Printf("tick %d: failure, retrying in %v...", tick, delay)
 			}
+			time.Sleep(delay)
 			continue
 		}
 
 		// Running: async action in progress, continue ticking
+		consecutiveFailures = 0
 	}
 
-	// Write report
+	// Write summary report
 	var w *os.File
 	if *output != "" {
 		w, err = os.Create(*output)
@@ -193,4 +220,63 @@ func runGalleryCheck() {
 	if *verbose {
 		log.Printf("Done: %d models checked", len(cfg.Reports))
 	}
+}
+
+func runGalleryApply(galleryPath, outputDir string, verbose bool) {
+	if outputDir == "" {
+		log.Fatal("apply mode requires -output-dir")
+	}
+
+	reports, err := galcheck.LoadReports(outputDir)
+	if err != nil {
+		log.Fatalf("load reports: %v", err)
+	}
+
+	if len(reports) == 0 {
+		fmt.Println("No reports found in", outputDir)
+		return
+	}
+
+	applied, err := galcheck.ApplyReports(galleryPath, reports)
+	if err != nil {
+		log.Fatalf("apply reports: %v", err)
+	}
+
+	if verbose {
+		for _, r := range reports {
+			if r.ProposedEntry != nil {
+				log.Printf("Applied: %s (%d findings)", r.Name, len(r.Findings))
+			}
+		}
+	}
+
+	fmt.Printf("Applied %d of %d reports to %s\n", applied, len(reports), galleryPath)
+}
+
+func printGalleryCheckUsage(flags *flag.FlagSet) {
+	fmt.Fprintln(os.Stderr, "Usage: beht gallery-check -gallery-path <index.yaml> [flags]")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Checks gallery model metadata against HuggingFace, generates per-model reports.")
+	fmt.Fprintln(os.Stderr, "Supports stop/resume via -output-dir and applying approved changes via -apply.")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Examples:")
+	fmt.Fprintln(os.Stderr, "  # Check models (resumable)")
+	fmt.Fprintln(os.Stderr, "  beht gallery-check -gallery-path index.yaml -output-dir ./results -verbose")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  # With LLM for tag/description synthesis")
+	fmt.Fprintln(os.Stderr, "  beht gallery-check -gallery-path index.yaml -output-dir ./results \\")
+	fmt.Fprintln(os.Stderr, "    -model Qwen3.5-9B-GGUF -base-url http://localhost:8080 -provider localai")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  # Apply approved reports back to gallery")
+	fmt.Fprintln(os.Stderr, "  beht gallery-check -gallery-path index.yaml -output-dir ./results -apply")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Flags:")
+	flags.PrintDefaults()
+}
+
+// backoff returns an exponential backoff delay: 1s, 2s, 4s, ... capped at maxDelay.
+func backoff(consecutiveFailures uint, maxDelay time.Duration) time.Duration {
+	shift := min(consecutiveFailures-1, 10)
+	d := time.Duration(1<<shift) * time.Second
+	return min(d, maxDelay)
 }

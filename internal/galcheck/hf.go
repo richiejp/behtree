@@ -10,15 +10,28 @@ import (
 	"time"
 )
 
+// HTTPError is returned when an HF API call gets a non-OK status code.
+type HTTPError struct {
+	StatusCode int
+	Action     string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("%s: HTTP %d", e.Action, e.StatusCode)
+}
+
 type HFClient struct {
 	baseURL string
 	client  *http.Client
 }
 
-func NewHFClient() *HFClient {
+func NewHFClient(timeout time.Duration) *HFClient {
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
 	return &HFClient{
 		baseURL: "https://huggingface.co",
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  &http.Client{Timeout: timeout},
 	}
 }
 
@@ -63,7 +76,7 @@ func (c *HFClient) GetModelInfo(repoID string) (*HFModelInfo, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch model info: HTTP %d", resp.StatusCode)
+		return nil, &HTTPError{StatusCode: resp.StatusCode, Action: "fetch model info"}
 	}
 
 	var info HFModelInfo
