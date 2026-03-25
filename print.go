@@ -3,6 +3,7 @@ package behtree
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 )
 
@@ -53,9 +54,14 @@ func nodeLabel(n *Node) string {
 }
 
 func formatParams(p Params) string {
+	keys := make([]string, 0, len(p))
+	for k := range p {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
 	parts := make([]string, 0, len(p))
-	for _, v := range p {
-		parts = append(parts, fmt.Sprintf("%v", v))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%v", p[k]))
 	}
 	return strings.Join(parts, ", ")
 }

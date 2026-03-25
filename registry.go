@@ -65,3 +65,11 @@ func (r *ActionRegistry) Has(name string) bool {
 	_, ok := r.handlers[name]
 	return ok
 }
+
+// Merge copies all handlers from other into this registry.
+// Existing handlers with the same name are overwritten.
+func (r *ActionRegistry) Merge(other *ActionRegistry) {
+	for name, handler := range other.handlers {
+		r.handlers[name] = handler
+	}
+}

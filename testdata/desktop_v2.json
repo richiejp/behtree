@@ -10,7 +10,8 @@
       "name": "firefox",
       "fields": {
         "open": "string",
-        "active_page": "string"
+        "active_page": "string",
+        "observed": "string"
       }
     },
     {
@@ -29,6 +30,14 @@
   ],
   "actions": [
     {
+      "name": "Observe",
+      "type": "Action",
+      "params": {"target": "object_ref"},
+      "postconditions": [
+        {"object": "$target", "field": "observed", "value": "true"}
+      ]
+    },
+    {
       "name": "QuerySwayTree",
       "type": "Action",
       "postconditions": [
@@ -40,7 +49,8 @@
       "type": "Action",
       "params": {"app": "object_ref"},
       "preconditions": [
-        {"object": "sway_state", "field": "refreshed", "value": "true"}
+        {"object": "sway_state", "field": "refreshed", "value": "true"},
+        {"object": "$app", "field": "observed", "value": "true"}
       ],
       "postconditions": [
         {"object": "$app", "field": "open", "value": "true"}
@@ -51,7 +61,8 @@
       "type": "Action",
       "params": {"app": "object_ref", "url": "string"},
       "preconditions": [
-        {"object": "$app", "field": "open", "value": "true"}
+        {"object": "$app", "field": "open", "value": "true"},
+        {"object": "$app", "field": "observed", "value": "true"}
       ],
       "postconditions": [
         {"object": "$app", "field": "active_page", "value": "$url"}
@@ -74,6 +85,7 @@
     }
   ],
   "goal": [
+    {"object": "firefox", "field": "observed", "value": "true"},
     {"object": "firefox", "field": "active_page", "value": "https://github.com/mudler/LocalAI"}
   ]
 }

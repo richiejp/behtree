@@ -30,10 +30,10 @@ var _ = Describe("Document Parsing", func() {
 		})
 
 		It("has actions with preconditions", func() {
-			Expect(doc.Actions).To(HaveLen(3))
-			// PickUp has preconditions
-			Expect(doc.Actions[1].Name).To(Equal("PickUp"))
-			Expect(doc.Actions[1].Preconditions).To(HaveLen(2))
+			Expect(doc.Actions).To(HaveLen(4))
+			// PickUp has preconditions (location, holding, observed, robot.observed)
+			Expect(doc.Actions[2].Name).To(Equal("PickUp"))
+			Expect(doc.Actions[2].Preconditions).To(HaveLen(4))
 		})
 
 		It("has a goal", func() {
@@ -56,23 +56,28 @@ var _ = Describe("Document Parsing", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("merges objects from env file", func() {
-			Expect(env.Objects).To(HaveLen(4))
+		It("merges objects from both environments", func() {
+			// inner: sway_state, firefox, utterance, task_tree
+			// outer: speech, task_tree, system (task_tree duplicated)
+			Expect(env.Objects).To(HaveLen(7))
 		})
 
-		It("merges actions from env file", func() {
-			Expect(env.Actions).To(HaveLen(6))
+		It("merges actions from both environments", func() {
+			// inner: Observe, QuerySwayTree, OpenApp, OpenURL, WaitForSpeech, ProcessUtterance, RunTaskTree
+			// outer: Observe, HandleSpeech, RunTaskTree, Idle (Observe + RunTaskTree duplicated)
+			Expect(env.Actions).To(HaveLen(11))
 		})
 
-		It("has a goal", func() {
-			Expect(env.Goal).To(HaveLen(1))
-			Expect(env.Goal[0].Object).To(Equal("firefox"))
-			Expect(env.Goal[0].Field).To(Equal("active_page"))
+		It("has the outer goal (last loaded wins)", func() {
+			Expect(env.Goal).To(HaveLen(2))
+			Expect(env.Goal[0].Object).To(Equal("speech"))
+			Expect(env.Goal[0].Field).To(Equal("observed"))
+			Expect(env.Goal[1].Object).To(Equal("system"))
+			Expect(env.Goal[1].Field).To(Equal("idle"))
 		})
 
-		It("has the outer tree", func() {
-			Expect(env.Trees).To(HaveLen(1))
-			Expect(env.Trees[0].Type).To(Equal(behtree.FallbackNode))
+		It("has no pre-built trees (both use PA-BT)", func() {
+			Expect(env.Trees).To(BeEmpty())
 		})
 	})
 })
@@ -215,37 +220,40 @@ var _ = Describe("Interpreter", func() {
 })
 
 var _ = Describe("RunTaskTree", func() {
-	It("executes a PA-BT inner tree via outer tree composition", func() {
-		env, err := behtree.LoadEnvironment(
-			"testdata/desktop_v2.json",
-			"testdata/desktop_v2_outer.json",
-		)
-		Expect(err).NotTo(HaveOccurred())
-
+	It("executes a PA-BT inner tree via PA-BT outer tree", func() {
 		// Build inner tree via PA-BT
-		dState := desktopTestState()
-		dActions := desktopTestActions()
-		dGoal := desktopTestGoal()
-
-		innerResult, err := behtree.BuildTree(dGoal, dActions, dState)
+		innerState := desktopTestState()
+		innerResult, err := behtree.BuildTree(desktopTestGoal(), desktopTestActions(), innerState)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Use environment state (includes all objects) and store inner tree
-		state := behtree.NewStateFromEnvironment(env)
-		Expect(state.Set("task_tree", "tree", innerResult.Tree)).To(Succeed())
+		// Build outer tree via PA-BT
+		outerState := desktopOuterTestState()
+		outerResult, err := behtree.BuildTree(desktopOuterTestGoal(), desktopOuterTestActions(), outerState)
+		Expect(err).NotTo(HaveOccurred())
 
-		// Start with the PA-BT registry (has condition handlers) and add action handlers
-		registry := innerResult.Registry
+		// Merge registries: outer PA-BT conditions + inner PA-BT conditions
+		registry := outerResult.Registry
+		registry.Merge(innerResult.Registry)
+
+		// Register action handlers
 		benchcases.RegisterDesktopInnerHandlers(registry)
 		benchcases.RegisterDesktopOuterHandlers(registry)
 
-		outerTree := env.Trees[0]
-		ip := behtree.NewInterpreter(env, registry, state)
+		// Set up combined runtime state
+		state := behtree.NewState()
+		state.EphemeralFields = []string{"observed", "idle"}
+		state.Objects["speech"] = map[string]any{"active": "true", "observed": "false"}
+		state.Objects["task_tree"] = map[string]any{"pending": "true", "tree": innerResult.Tree}
+		state.Objects["system"] = map[string]any{"idle": "false"}
+		state.Objects["sway_state"] = map[string]any{"refreshed": "false"}
+		state.Objects["firefox"] = map[string]any{"open": "false", "active_page": "", "observed": "false"}
+
+		ip := behtree.NewInterpreter(nil, registry, state)
 		ip.SetOutcomeRequest(behtree.RequestSuccess)
 
 		var finalStatus behtree.Status
 		for range 20 {
-			status, tickErr := ip.Tick(outerTree)
+			status, tickErr := ip.Tick(outerResult.Tree)
 			Expect(tickErr).NotTo(HaveOccurred())
 			finalStatus = status
 			if status == behtree.Success {
@@ -257,6 +265,10 @@ var _ = Describe("RunTaskTree", func() {
 		// Verify the inner tree executed and changed state
 		activePage, _ := state.Get("firefox", "active_page")
 		Expect(activePage).To(Equal(desktopTestURL))
+
+		// Verify outer tree reached idle
+		idle, _ := state.Get("system", "idle")
+		Expect(idle).To(Equal("true"))
 	})
 })
 

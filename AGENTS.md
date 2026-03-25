@@ -118,9 +118,10 @@ Example environments in `testdata/`:
 
 - `robot_v2.json` — robot pick-and-place with PA-BT format (actions + goal)
 - `robot.json` — legacy epoch 1 format (kept for reference)
-- `desktop_env.json` — desktop assistant action/object definitions
-- `desktop_outer.json` — fixed outer voice-interaction tree
-- `desktop_inner.json` — LLM-generated inner task tree
+- `desktop_v2.json` — desktop inner tree environment (PA-BT: Observe, OpenApp, OpenURL)
+- `desktop_v2_outer.json` — desktop outer tree environment (PA-BT: HandleSpeech, RunTaskTree, Idle)
+- `desktop_v2_actions.json` / `desktop_v2_outer_actions.json` — action selections for above
+- `desktop_env.json` / `desktop_outer.json` / `desktop_inner.json` — legacy epoch 1 formats
 
 ## Design Decisions
 
@@ -129,4 +130,7 @@ Example environments in `testdata/`:
 - **Condition nodes are auto-generated** — PA-BT creates them from action pre/postconditions
 - **StateRef for dynamic conditions** — `$param.field` resolves to runtime state lookups
 - **Simulation uses outcome requests** — the harness asks handlers to produce specific outcomes
-- **Dynamic subtrees** — `RunTaskTree` enables LLM-generated inner trees composed within fixed outer trees
+- **Dynamic subtrees** — `RunTaskTree` executes PA-BT inner trees within PA-BT outer trees
+- **Ephemeral state fields** — `observed` and `idle` fields are reset at tick start by the interpreter, forcing re-observation of external state and re-evaluation of derived conditions
+- **Generic Observe action** — a single `Observe(target)` action re-syncs internal state with reality; the handler dispatches to target-specific observers and can internally cache or use cheaper heuristics
+- **Worst-case planning state** — trees must be built from worst-case initial state so PA-BT expands all fallback branches; runtime state may differ

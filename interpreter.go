@@ -8,6 +8,7 @@ type Interpreter struct {
 	state       *State
 	requestFunc func() OutcomeRequest
 	tracer      Tracer
+	tickDepth   int
 }
 
 func NewInterpreter(env *Environment, registry *BehaviourRegistry, state *State) *Interpreter {
@@ -51,6 +52,12 @@ func (ip *Interpreter) Tick(n *Node) (Status, error) {
 	if n == nil {
 		return Failure, fmt.Errorf("nil node")
 	}
+
+	if ip.tickDepth == 0 {
+		ip.state.ResetEphemeral()
+	}
+	ip.tickDepth++
+	defer func() { ip.tickDepth-- }()
 
 	ip.tracer.EnterNode(n)
 

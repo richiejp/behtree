@@ -7,6 +7,7 @@ require (
 	github.com/onsi/ginkgo/v2 v2.28.1
 	github.com/onsi/gomega v1.39.1
 	github.com/sashabaranov/go-openai v1.41.2
+	go.yaml.in/yaml/v3 v3.0.4
 )
 
 replace github.com/mudler/cogito => ../../mudler/cogito
@@ -31,7 +32,6 @@ require (
 	github.com/spf13/cast v1.7.0 // indirect
 	github.com/tmc/langchaingo v0.1.13 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.47.0 // indirect
 	golang.org/x/mod v0.32.0 // indirect
 	golang.org/x/net v0.49.0 // indirect

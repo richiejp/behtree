@@ -1,0 +1,6 @@
+[
+  {"name": "Observe", "params": {"target": "speech"}},
+  {"name": "HandleSpeech", "params": {}},
+  {"name": "RunTaskTree", "params": {"tree_variable": "task_tree.tree"}},
+  {"name": "Idle", "params": {}}
+]

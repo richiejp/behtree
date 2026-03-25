@@ -7,6 +7,8 @@ import "github.com/richiejp/behtree"
 // Condition handlers (IsHolding, IsAt) are no longer needed since PA-BT
 // auto-generates condition nodes with their own handlers.
 func RegisterRobotHandlers(registry *behtree.ActionRegistry) {
+	RegisterObserveHandler(registry)
+
 	registry.Register("NavigateTo", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
 		loc := params["location"].(string)
 		robotLoc, _ := s.Get("robot", "location")
@@ -56,10 +58,27 @@ func RegisterRobotHandlers(registry *behtree.ActionRegistry) {
 	})
 }
 
+// RegisterObserveHandler registers the generic Observe action handler.
+// In a real implementation, the handler would dispatch to target-specific
+// observers (screenshot, sway tree, etc.) and update the target's fields
+// from observed reality. The handler can internally cache or use cheaper
+// heuristics.
+func RegisterObserveHandler(registry *behtree.ActionRegistry) {
+	registry.Register("Observe", func(params behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
+		target := params["target"].(string)
+		if req == behtree.RequestFailure {
+			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
+		}
+		_ = s.Set(target, "observed", "true")
+		return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+	})
+}
+
 // RegisterDesktopInnerHandlers registers handlers for the desktop inner tree
-// actions (QuerySwayTree, OpenApp, OpenURL). PA-BT auto-generates condition
-// node handlers, so only action handlers are needed.
+// actions (Observe, QuerySwayTree, OpenApp, OpenURL). PA-BT auto-generates
+// condition node handlers, so only action handlers are needed.
 func RegisterDesktopInnerHandlers(registry *behtree.ActionRegistry) {
+	RegisterObserveHandler(registry)
 	registry.Register("QuerySwayTree", func(_ behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
 		if req == behtree.RequestFailure {
 			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
@@ -93,36 +112,26 @@ func RegisterDesktopInnerHandlers(registry *behtree.ActionRegistry) {
 }
 
 // RegisterDesktopOuterHandlers registers handlers for the desktop outer tree
-// conditions and actions (HasTaskTree, HasPendingUtterance, UserSpeaking,
-// WaitForSpeech, ProcessUtterance).
+// actions (HandleSpeech, Idle). RunTaskTree is handled by the interpreter
+// directly (tickRunTaskTree), so it does not need a registry handler.
 func RegisterDesktopOuterHandlers(registry *behtree.ActionRegistry) {
-	registry.Register("HasTaskTree", func(_ behtree.Params, s *behtree.State, _ behtree.OutcomeRequest) behtree.HandlerResult {
-		val, _ := s.Get("task_tree", "tree")
-		if val != nil {
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+	RegisterObserveHandler(registry)
+
+	registry.Register("HandleSpeech", func(_ behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
+		if req == behtree.RequestFailure {
+			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 		}
-		return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
+		// In a real implementation, this would wait for speech to finish
+		// and process the utterance (possibly creating a task tree).
+		_ = s.Set("speech", "active", "false")
+		return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
 	})
 
-	registry.Register("HasPendingUtterance", func(_ behtree.Params, _ *behtree.State, _ behtree.OutcomeRequest) behtree.HandlerResult {
-		return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
-	})
-
-	registry.Register("UserSpeaking", func(_ behtree.Params, _ *behtree.State, _ behtree.OutcomeRequest) behtree.HandlerResult {
-		return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
-	})
-
-	registry.Register("WaitForSpeech", func(_ behtree.Params, _ *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-		if req == behtree.RequestSuccess {
-			return behtree.HandlerResult{Status: behtree.Running, Compatible: false}
+	registry.Register("Idle", func(_ behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
+		if req == behtree.RequestFailure {
+			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 		}
-		return behtree.HandlerResult{Status: behtree.Running, Compatible: true}
-	})
-
-	registry.Register("ProcessUtterance", func(_ behtree.Params, _ *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
-		if req == behtree.RequestSuccess {
-			return behtree.HandlerResult{Status: behtree.Running, Compatible: false}
-		}
-		return behtree.HandlerResult{Status: behtree.Running, Compatible: true}
+		_ = s.Set("system", "idle", "true")
+		return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
 	})
 }

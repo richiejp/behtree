@@ -1,53 +1,74 @@
 {
-  "tree": {
-    "type": "Fallback",
-    "children": [
-      {
-        "type": "Sequence",
-        "children": [
-          {
-            "type": "Condition",
-            "name": "HasTaskTree"
-          },
-          {
-            "type": "Action",
-            "name": "RunTaskTree",
-            "params": {
-              "tree_variable": "task_tree.tree"
-            }
-          }
-        ]
-      },
-      {
-        "type": "Sequence",
-        "children": [
-          {
-            "type": "Condition",
-            "name": "HasPendingUtterance"
-          },
-          {
-            "type": "Action",
-            "name": "ProcessUtterance"
-          }
-        ]
-      },
-      {
-        "type": "Sequence",
-        "children": [
-          {
-            "type": "Condition",
-            "name": "UserSpeaking"
-          },
-          {
-            "type": "Action",
-            "name": "WaitForSpeech"
-          }
-        ]
-      },
-      {
-        "type": "Action",
-        "name": "WaitForSpeech"
+  "objects": [
+    {
+      "name": "speech",
+      "fields": {
+        "active": "string",
+        "observed": "string"
       }
-    ]
-  }
+    },
+    {
+      "name": "task_tree",
+      "fields": {
+        "pending": "string",
+        "tree": "object"
+      }
+    },
+    {
+      "name": "system",
+      "fields": {
+        "idle": "string"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "name": "Observe",
+      "type": "Action",
+      "params": {"target": "object_ref"},
+      "postconditions": [
+        {"object": "$target", "field": "observed", "value": "true"}
+      ]
+    },
+    {
+      "name": "HandleSpeech",
+      "type": "Action",
+      "async": true,
+      "preconditions": [
+        {"object": "speech", "field": "observed", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "speech", "field": "active", "value": "false"}
+      ]
+    },
+    {
+      "name": "RunTaskTree",
+      "type": "Action",
+      "async": true,
+      "params": {"tree_variable": "string"},
+      "preconditions": [
+        {"object": "speech", "field": "active", "value": "false"},
+        {"object": "speech", "field": "observed", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "task_tree", "field": "pending", "value": "false"}
+      ]
+    },
+    {
+      "name": "Idle",
+      "type": "Action",
+      "preconditions": [
+        {"object": "speech", "field": "active", "value": "false"},
+        {"object": "task_tree", "field": "pending", "value": "false"},
+        {"object": "speech", "field": "observed", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "system", "field": "idle", "value": "true"}
+      ]
+    }
+  ],
+  "goal": [
+    {"object": "speech", "field": "observed", "value": "true"},
+    {"object": "system", "field": "idle", "value": "true"}
+  ]
 }

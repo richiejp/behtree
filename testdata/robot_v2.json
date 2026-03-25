@@ -4,37 +4,50 @@
       "name": "wrapper",
       "fields": {
         "type": "string",
-        "location": "string"
+        "location": "string",
+        "observed": "string"
       }
     },
     {
       "name": "table",
       "fields": {
-        "type": "string"
+        "type": "string",
+        "location": "string"
       }
     },
     {
       "name": "bin",
       "fields": {
-        "type": "string"
+        "type": "string",
+        "location": "string",
+        "observed": "string"
       }
     },
     {
       "name": "robot",
       "fields": {
         "location": "string",
-        "holding": "string"
+        "holding": "string",
+        "observed": "string"
       }
     }
   ],
   "actions": [
+    {
+      "name": "Observe",
+      "type": "Action",
+      "params": {"target": "object_ref"},
+      "postconditions": [
+        {"object": "$target", "field": "observed", "value": "true"}
+      ]
+    },
     {
       "name": "NavigateTo",
       "type": "Action",
       "params": {"location": "object_ref"},
       "async": true,
       "postconditions": [
-        {"object": "robot", "field": "location", "value": "$location"}
+        {"object": "robot", "field": "location", "value": "$location.location"}
       ]
     },
     {
@@ -43,7 +56,9 @@
       "params": {"object": "object_ref"},
       "preconditions": [
         {"object": "robot", "field": "location", "value": "$object.location"},
-        {"object": "robot", "field": "holding", "value": ""}
+        {"object": "robot", "field": "holding", "value": ""},
+        {"object": "$object", "field": "observed", "value": "true"},
+        {"object": "robot", "field": "observed", "value": "true"}
       ],
       "postconditions": [
         {"object": "robot", "field": "holding", "value": "$object"}
@@ -55,7 +70,9 @@
       "params": {"object": "object_ref", "container": "object_ref"},
       "preconditions": [
         {"object": "robot", "field": "holding", "value": "$object"},
-        {"object": "robot", "field": "location", "value": "$container"}
+        {"object": "robot", "field": "location", "value": "$container.location"},
+        {"object": "$container", "field": "observed", "value": "true"},
+        {"object": "robot", "field": "observed", "value": "true"}
       ],
       "postconditions": [
         {"object": "robot", "field": "holding", "value": ""},

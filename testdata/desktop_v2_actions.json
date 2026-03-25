@@ -1,4 +1,5 @@
 [
+  {"name": "Observe", "params": {"target": "firefox"}},
   {"name": "QuerySwayTree", "params": {}},
   {"name": "OpenApp", "params": {"app": "firefox"}},
   {"name": "OpenURL", "params": {"app": "firefox", "url": "https://github.com/mudler/LocalAI"}}

@@ -95,7 +95,7 @@ Sequence
         ├── Fallback
         │   ├── Condition: robot.location==bin
         │   └── Action: NavigateTo(bin)
-        └── Action: DropIn(wrapper, bin)
+        └── Action: DropIn(bin, wrapper)
 ```
 
 PA-BT constructed this by backchaining from the goal `wrapper.location==bin`:
@@ -116,19 +116,26 @@ The tree is reactive — on every tick it re-evaluates from the root, so if the 
 
 ## Example: Desktop Voice Assistant
 
-A voice assistant for the Sway desktop must open a URL in Firefox. This example demonstrates two-layer composition: a hand-authored outer tree handles the voice interaction loop, while PA-BT generates the task-specific inner tree.
+A voice assistant for the Sway desktop must open a URL in Firefox. This example demonstrates two-layer PA-BT composition: an outer tree manages the voice interaction loop (handle speech, run tasks, idle), while inner trees are generated per-task (e.g., open a URL in Firefox).
 
 ### Inner Tree (PA-BT generated)
 
-The inner tree actions have pre/postconditions. PA-BT builds the tree automatically from the goal.
+The inner tree actions have pre/postconditions. PA-BT builds the tree automatically from the goal. Objects representing external state (like `firefox`) have an `observed` field — the interpreter resets all `observed` fields to `"false"` at the start of each tick, forcing re-observation. The generic `Observe` action re-synchronizes internal state with reality; its handler can internally choose cheap heuristics (Sway tree query) or expensive perception (screenshot + vision model).
+
+Actions that depend on external state (`OpenApp`, `OpenURL`) have `observed==true` as a precondition. PA-BT backchains this into the tree, placing `Observe` before each action that needs fresh state. With `observed==true` first in the goal, the tree observes reality before checking any conditions — if the goal is already satisfied, no actions run.
 
 ```json
 {
   "objects": [
     {"name": "sway_state", "fields": {"refreshed": "string"}},
-    {"name": "firefox", "fields": {"open": "string", "active_page": "string"}}
+    {"name": "firefox", "fields": {"open": "string", "active_page": "string", "observed": "string"}}
   ],
   "actions": [
+    {
+      "name": "Observe", "type": "Action",
+      "params": {"target": "object_ref"},
+      "postconditions": [{"object": "$target", "field": "observed", "value": "true"}]
+    },
     {
       "name": "QuerySwayTree", "type": "Action",
       "postconditions": [{"object": "sway_state", "field": "refreshed", "value": "true"}]
@@ -136,24 +143,40 @@ The inner tree actions have pre/postconditions. PA-BT builds the tree automatica
     {
       "name": "OpenApp", "type": "Action",
       "params": {"app": "object_ref"},
-      "preconditions": [{"object": "sway_state", "field": "refreshed", "value": "true"}],
-      "postconditions": [{"object": "$app", "field": "open", "value": "true"}]
+      "preconditions": [
+        {"object": "sway_state", "field": "refreshed", "value": "true"},
+        {"object": "$app", "field": "observed", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "$app", "field": "open", "value": "true"}
+      ]
     },
     {
       "name": "OpenURL", "type": "Action",
       "params": {"app": "object_ref", "url": "string"},
-      "preconditions": [{"object": "$app", "field": "open", "value": "true"}],
-      "postconditions": [{"object": "$app", "field": "active_page", "value": "$url"}]
+      "preconditions": [
+        {"object": "$app", "field": "open", "value": "true"},
+        {"object": "$app", "field": "observed", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "$app", "field": "active_page", "value": "$url"}
+      ]
     }
   ],
-  "goal": [{"object": "firefox", "field": "active_page", "value": "https://github.com/mudler/LocalAI"}]
+  "goal": [
+    {"object": "firefox", "field": "observed", "value": "true"},
+    {"object": "firefox", "field": "active_page", "value": "https://github.com/mudler/LocalAI"}
+  ]
 }
 ```
 
-Given action selections `[QuerySwayTree, OpenApp(firefox), OpenURL(firefox, URL)]`, PA-BT generates:
+Given action selections `[Observe(firefox), QuerySwayTree, OpenApp(firefox), OpenURL(firefox, URL)]`, PA-BT generates:
 
 ```
 Sequence
+├── Fallback
+│   ├── Condition: firefox.observed==true
+│   └── Action: Observe(firefox)
 └── Fallback
     ├── Condition: firefox.active_page==https://github.com/mudler/LocalAI
     └── Sequence
@@ -163,23 +186,108 @@ Sequence
         │       ├── Fallback
         │       │   ├── Condition: sway_state.refreshed==true
         │       │   └── Action: QuerySwayTree
+        │       ├── Fallback
+        │       │   ├── Condition: firefox.observed==true
+        │       │   └── Action: Observe(firefox)
         │       └── Action: OpenApp(firefox)
+        ├── Fallback
+        │   ├── Condition: firefox.observed==true
+        │   └── Action: Observe(firefox)
         └── Action: OpenURL(firefox, https://github.com/mudler/LocalAI)
 ```
 
-### Outer Tree (hand-authored)
+The tree observes first, then checks conditions with fresh state. If Firefox is already on the right page, the top-level condition passes and no actions run. If not, `Observe` appears as a precondition guard before each action (OpenApp, OpenURL), ensuring the tree always acts on observed reality rather than stale cached state.
 
-The outer tree is fixed control flow — it handles voice interaction and delegates to the inner tree via `RunTaskTree`:
+### Outer Tree (PA-BT generated)
+
+The outer tree is also PA-BT generated. Its goal is `speech.observed==true` then `system.idle==true` — meaning speech has been observed (fresh state) and all work completed. Like the inner tree, `speech` has an `observed` field that resets each tick, and `Observe(speech)` is a precondition on every action that depends on speech state.
+
+The tree must be built from worst-case initial state (`speech.active="true"`, `task_tree.pending="true"`) so PA-BT expands all fallback branches. At runtime, conditions that are already satisfied are simply checked and skipped.
+
+```json
+{
+  "objects": [
+    {"name": "speech", "fields": {"active": "string", "observed": "string"}},
+    {"name": "task_tree", "fields": {"pending": "string", "tree": "object"}},
+    {"name": "system", "fields": {"idle": "string"}}
+  ],
+  "actions": [
+    {
+      "name": "Observe", "type": "Action",
+      "params": {"target": "object_ref"},
+      "postconditions": [{"object": "$target", "field": "observed", "value": "true"}]
+    },
+    {
+      "name": "HandleSpeech", "type": "Action", "async": true,
+      "preconditions": [{"object": "speech", "field": "observed", "value": "true"}],
+      "postconditions": [{"object": "speech", "field": "active", "value": "false"}]
+    },
+    {
+      "name": "RunTaskTree", "type": "Action", "async": true,
+      "params": {"tree_variable": "string"},
+      "preconditions": [
+        {"object": "speech", "field": "active", "value": "false"},
+        {"object": "speech", "field": "observed", "value": "true"}
+      ],
+      "postconditions": [{"object": "task_tree", "field": "pending", "value": "false"}]
+    },
+    {
+      "name": "Idle", "type": "Action",
+      "preconditions": [
+        {"object": "speech", "field": "active", "value": "false"},
+        {"object": "task_tree", "field": "pending", "value": "false"},
+        {"object": "speech", "field": "observed", "value": "true"}
+      ],
+      "postconditions": [{"object": "system", "field": "idle", "value": "true"}]
+    }
+  ],
+  "goal": [
+    {"object": "speech", "field": "observed", "value": "true"},
+    {"object": "system", "field": "idle", "value": "true"}
+  ]
+}
+```
+
+Given action selections `[Observe(speech), HandleSpeech, RunTaskTree(task_tree.tree), Idle]`, PA-BT generates:
 
 ```
-Fallback
-├── Sequence [HasTaskTree → RunTaskTree]
-├── Sequence [HasPendingUtterance → ProcessUtterance]
-├── Sequence [UserSpeaking → WaitForSpeech]
-└── WaitForSpeech
+Sequence
+├── Fallback
+│   ├── Condition: speech.observed==true
+│   └── Action: Observe(speech)
+└── Fallback
+    ├── Condition: system.idle==true
+    └── Sequence
+        ├── Fallback
+        │   ├── Condition: speech.active==false
+        │   └── Sequence
+        │       ├── Fallback
+        │       │   ├── Condition: speech.observed==true
+        │       │   └── Action: Observe(speech)
+        │       └── Action: HandleSpeech
+        ├── Fallback
+        │   ├── Condition: task_tree.pending==false
+        │   └── Sequence
+        │       ├── Fallback
+        │       │   ├── Condition: speech.active==false
+        │       │   └── Sequence
+        │       │       ├── Fallback
+        │       │       │   ├── Condition: speech.observed==true
+        │       │       │   └── Action: Observe(speech)
+        │       │       └── Action: HandleSpeech
+        │       ├── Fallback
+        │       │   ├── Condition: speech.observed==true
+        │       │   └── Action: Observe(speech)
+        │       └── Action: RunTaskTree(task_tree.tree)
+        ├── Fallback
+        │   ├── Condition: speech.observed==true
+        │   └── Action: Observe(speech)
+        └── Action: Idle
 ```
 
-The inner tree is stored in state at `task_tree.tree`. When `HasTaskTree` succeeds, `RunTaskTree` executes the PA-BT-generated tree. The outer tree stays hand-authored because it's event-driven control flow, not goal-directed planning.
+The tree observes speech first, then checks conditions with fresh state. `Observe(speech)` appears as a precondition guard before every action that depends on speech state — HandleSpeech, RunTaskTree, and Idle all require knowing whether speech is active.
+
+The interpreter resets ephemeral fields (`observed`, `idle`) at each tick start, so both `speech.observed` and `system.idle` are always re-evaluated. The inner task tree is stored in state at `task_tree.tree` and executed by `RunTaskTree` as a dynamic subtree.
 
 ## LLM Integration
 
