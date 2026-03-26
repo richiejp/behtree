@@ -256,20 +256,28 @@ func fetchModelInfoHandler(cfg *Config) behtree.Handler {
 		}
 
 		allRepoInfo := make(map[string]*RepoInfo, len(repos))
-		allFailed := true
+		anySucceeded := false
+		all401 := true
 		for _, repoID := range repos {
 			ri := fetchSingleRepoInfo(cfg, repoID)
 			allRepoInfo[repoID] = ri
 			if ri.Metadata != nil {
-				allFailed = false
+				anySucceeded = true
+				all401 = false
+			} else if ri.Error != "" && !strings.Contains(ri.Error, "HTTP 401") {
+				all401 = false
 			}
 		}
 
-		// If all repos failed with 401, mark for deletion
-		if allFailed {
-			log.Printf("FetchModelInfo: %s all repos inaccessible, marking for deletion", name)
-			markForDeletion(cfg, s, repos[0], "all HF repos returned errors")
-			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+		if !anySucceeded {
+			if all401 {
+				log.Printf("FetchModelInfo: %s all repos returned 401, marking for deletion", name)
+				markForDeletion(cfg, s, repos[0], "all HF repos returned 401 (private or removed)")
+				return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+			}
+			// Transient errors (rate limit, timeout, etc.) — retry via BT backoff
+			log.Printf("FetchModelInfo: %s all repos failed (transient), will retry", name)
+			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 		}
 
 		allInfoJSON, _ := json.Marshal(allRepoInfo)
