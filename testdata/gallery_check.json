@@ -7,6 +7,14 @@
       }
     },
     {
+      "name": "rate_limit",
+      "fields": {
+        "observed": "string",
+        "api_ok": "string",
+        "resolvers_ok": "string"
+      }
+    },
+    {
       "name": "model_check",
       "fields": {
         "loaded": "string",
@@ -31,11 +39,30 @@
       ]
     },
     {
+      "name": "ObserveRateLimit",
+      "type": "Action",
+      "postconditions": [
+        {"object": "rate_limit", "field": "observed", "value": "true"}
+      ]
+    },
+    {
+      "name": "WaitForRateLimit",
+      "type": "Action",
+      "preconditions": [
+        {"object": "rate_limit", "field": "observed", "value": "true"}
+      ],
+      "postconditions": [
+        {"object": "rate_limit", "field": "api_ok", "value": "true"},
+        {"object": "rate_limit", "field": "resolvers_ok", "value": "true"}
+      ]
+    },
+    {
       "name": "FetchModelInfo",
       "type": "Action",
       "async": true,
       "preconditions": [
-        {"object": "model_check", "field": "loaded", "value": "true"}
+        {"object": "model_check", "field": "loaded", "value": "true"},
+        {"object": "rate_limit", "field": "api_ok", "value": "true"}
       ],
       "postconditions": [
         {"object": "model_check", "field": "info_fetched", "value": "true"}
@@ -46,7 +73,9 @@
       "type": "Action",
       "async": true,
       "preconditions": [
-        {"object": "model_check", "field": "loaded", "value": "true"}
+        {"object": "model_check", "field": "loaded", "value": "true"},
+        {"object": "rate_limit", "field": "api_ok", "value": "true"},
+        {"object": "rate_limit", "field": "resolvers_ok", "value": "true"}
       ],
       "postconditions": [
         {"object": "model_check", "field": "files_verified", "value": "true"}

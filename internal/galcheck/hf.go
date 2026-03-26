@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,9 +22,18 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("%s: HTTP %d", e.Action, e.StatusCode)
 }
 
+// RateLimitBucket tracks the state of one HF rate-limit bucket.
+type RateLimitBucket struct {
+	Remaining int
+	ResetAt   time.Time
+}
+
 type HFClient struct {
-	baseURL string
-	client  *http.Client
+	baseURL  string
+	client   *http.Client
+	mu       sync.Mutex
+	apiLimit RateLimitBucket
+	resLimit RateLimitBucket
 }
 
 func NewHFClient(timeout time.Duration) *HFClient {
@@ -74,6 +85,7 @@ func (c *HFClient) GetModelInfo(repoID string) (*HFModelInfo, error) {
 		return nil, fmt.Errorf("fetch model info: %w", err)
 	}
 	defer resp.Body.Close()
+	c.updateRateLimits(resp)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, &HTTPError{StatusCode: resp.StatusCode, Action: "fetch model info"}
@@ -105,6 +117,7 @@ func (c *HFClient) listFilesInPath(repoID, path string) ([]HFFileInfo, error) {
 		return nil, fmt.Errorf("list files: %w", err)
 	}
 	defer resp.Body.Close()
+	c.updateRateLimits(resp)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("list files: HTTP %d", resp.StatusCode)
@@ -158,6 +171,7 @@ func (c *HFClient) GetReadme(repoID string) (string, error) {
 		return "", fmt.Errorf("fetch readme: %w", err)
 	}
 	defer resp.Body.Close()
+	c.updateRateLimits(resp)
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("fetch readme: HTTP %d", resp.StatusCode)
@@ -180,6 +194,7 @@ func (c *HFClient) SafetyScan(repoID string) (*HFScanResult, error) {
 		return nil, fmt.Errorf("safety scan: %w", err)
 	}
 	defer resp.Body.Close()
+	c.updateRateLimits(resp)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("safety scan: HTTP %d", resp.StatusCode)
@@ -207,8 +222,98 @@ func (c *HFClient) CheckFileAccessible(uri string) (bool, int, error) {
 		return false, 0, fmt.Errorf("head request: %w", err)
 	}
 	defer resp.Body.Close()
+	c.updateRateLimits(resp)
 
 	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusFound, resp.StatusCode, nil
+}
+
+// parseRateLimits parses the HF RateLimit header.
+// Format: "api";r=999;t=120, "resolvers";r=4999;t=120
+func parseRateLimits(header string, now time.Time) (api, resolvers *RateLimitBucket) {
+	for entry := range strings.SplitSeq(header, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		parts := strings.Split(entry, ";")
+		if len(parts) < 1 {
+			continue
+		}
+
+		bucket := strings.Trim(parts[0], `" `)
+		var remaining int
+		var resetSec int
+		for _, kv := range parts[1:] {
+			kv = strings.TrimSpace(kv)
+			if after, ok := strings.CutPrefix(kv, "r="); ok {
+				remaining, _ = strconv.Atoi(after)
+			} else if after, ok := strings.CutPrefix(kv, "t="); ok {
+				resetSec, _ = strconv.Atoi(after)
+			}
+		}
+
+		b := &RateLimitBucket{
+			Remaining: remaining,
+			ResetAt:   now.Add(time.Duration(resetSec) * time.Second),
+		}
+
+		switch bucket {
+		case "api":
+			api = b
+		case "resolvers":
+			resolvers = b
+		}
+	}
+	return api, resolvers
+}
+
+func (c *HFClient) updateRateLimits(resp *http.Response) {
+	header := resp.Header.Get("RateLimit")
+	if header == "" {
+		return
+	}
+
+	now := time.Now()
+	api, resolvers := parseRateLimits(header, now)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if api != nil {
+		c.apiLimit = *api
+	}
+	if resolvers != nil {
+		c.resLimit = *resolvers
+	}
+}
+
+func (c *HFClient) bucketOK(b *RateLimitBucket) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return b.Remaining > 0 || time.Now().After(b.ResetAt)
+}
+
+// APILimitOK reports whether the API rate limit bucket has capacity.
+func (c *HFClient) APILimitOK() bool { return c.bucketOK(&c.apiLimit) }
+
+// ResolversLimitOK reports whether the resolvers rate limit bucket has capacity.
+func (c *HFClient) ResolversLimitOK() bool { return c.bucketOK(&c.resLimit) }
+
+// NextResetTime returns the latest reset time of any exhausted bucket.
+func (c *HFClient) NextResetTime() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var latest time.Time
+	now := time.Now()
+	if c.apiLimit.Remaining <= 0 && c.apiLimit.ResetAt.After(now) && c.apiLimit.ResetAt.After(latest) {
+		latest = c.apiLimit.ResetAt
+	}
+	if c.resLimit.Remaining <= 0 && c.resLimit.ResetAt.After(now) && c.resLimit.ResetAt.After(latest) {
+		latest = c.resLimit.ResetAt
+	}
+	return latest
 }
 
 func resolveHFURI(uri, baseURL string) string {

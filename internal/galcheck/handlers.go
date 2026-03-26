@@ -47,6 +47,8 @@ type RepoInfo struct {
 func RegisterHandlers(registry *behtree.ActionRegistry, cfg *Config) {
 	cfg.processed = make(map[string]bool)
 	registry.Register("ScanGallery", scanGalleryHandler(cfg))
+	registry.Register("ObserveRateLimit", observeRateLimitHandler(cfg))
+	registry.Register("WaitForRateLimit", waitForRateLimitHandler(cfg))
 	registry.Register("FetchModelInfo", fetchModelInfoHandler(cfg))
 	registry.Register("VerifyFiles", verifyFilesHandler(cfg))
 	registry.Register("SynthesizeUpdate", synthesizeUpdateHandler(cfg))
@@ -157,6 +159,65 @@ func scanGalleryHandler(cfg *Config) behtree.Handler {
 		}
 		_ = s.Set("model_check", "loaded", "false")
 		return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+	}
+}
+
+func observeRateLimitHandler(cfg *Config) behtree.Handler {
+	return func(_ behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
+		if req == behtree.RequestFailure {
+			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
+		}
+
+		_ = s.Set("rate_limit", "observed", "true")
+
+		apiOK := cfg.HF.APILimitOK()
+		resOK := cfg.HF.ResolversLimitOK()
+
+		if apiOK {
+			_ = s.Set("rate_limit", "api_ok", "true")
+		} else {
+			_ = s.Set("rate_limit", "api_ok", "false")
+		}
+		if resOK {
+			_ = s.Set("rate_limit", "resolvers_ok", "true")
+		} else {
+			_ = s.Set("rate_limit", "resolvers_ok", "false")
+		}
+
+		if cfg.Verbose {
+			log.Printf("ObserveRateLimit: api_ok=%v resolvers_ok=%v", apiOK, resOK)
+		}
+
+		return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+	}
+}
+
+func waitForRateLimitHandler(cfg *Config) behtree.Handler {
+	return func(_ behtree.Params, s *behtree.State, req behtree.OutcomeRequest) behtree.HandlerResult {
+		if req == behtree.RequestFailure {
+			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
+		}
+
+		if cfg.HF.APILimitOK() && cfg.HF.ResolversLimitOK() {
+			_ = s.Set("rate_limit", "api_ok", "true")
+			_ = s.Set("rate_limit", "resolvers_ok", "true")
+			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+		}
+
+		resetAt := cfg.HF.NextResetTime()
+		remaining := time.Until(resetAt)
+
+		if remaining <= 0 {
+			_ = s.Set("rate_limit", "api_ok", "true")
+			_ = s.Set("rate_limit", "resolvers_ok", "true")
+			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+		}
+
+		sleepDuration := min(remaining, 5*time.Second)
+		log.Printf("WaitForRateLimit: rate limited, sleeping %v (reset in %v)", sleepDuration, remaining)
+		time.Sleep(sleepDuration)
+
+		return behtree.HandlerResult{Status: behtree.Running, Compatible: true}
 	}
 }
 
