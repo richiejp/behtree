@@ -60,26 +60,69 @@ func NeedsCheck(entry *GalleryEntry, maxAge time.Duration) bool {
 	return time.Since(checked) > maxAge
 }
 
-func ExtractHFRepo(entry *GalleryEntry) string {
-	for _, u := range entry.URLs {
-		if repo := parseHFURL(u); repo != "" {
-			return repo
-		}
-	}
+// FileRepoMapping records which HF repo a gallery file comes from.
+type FileRepoMapping struct {
+	Filename string `json:"filename"`
+	Repo     string `json:"repo"` // "owner/repo" or "" if non-HF
+}
 
-	// Try file URIs as fallback
-	for _, f := range entry.Files {
-		if repo := parseHFURL(f.URI); repo != "" {
-			return repo
-		}
-		if strings.HasPrefix(f.URI, "huggingface://") {
-			parts := strings.SplitN(strings.TrimPrefix(f.URI, "huggingface://"), "/", 3)
+// extractRepoFromURI extracts an "owner/repo" HF repo ID from a file URI.
+// Handles https://huggingface.co/..., huggingface://..., and hf://... schemes.
+func extractRepoFromURI(uri string) string {
+	if repo := parseHFURL(uri); repo != "" {
+		return repo
+	}
+	for _, prefix := range []string{"huggingface://", "hf://"} {
+		if after, ok := strings.CutPrefix(uri, prefix); ok {
+			parts := strings.SplitN(after, "/", 3)
 			if len(parts) >= 2 {
 				return parts[0] + "/" + parts[1]
 			}
 		}
 	}
+	return ""
+}
 
+// ExtractHFRepos returns all unique HF repos referenced by an entry and
+// a per-file mapping. Repos from entry.URLs come first, then repos from
+// file URIs, deduplicated and in order of first appearance.
+func ExtractHFRepos(entry *GalleryEntry) ([]string, []FileRepoMapping) {
+	seen := make(map[string]bool)
+	var repos []string
+
+	addRepo := func(repo string) {
+		if repo != "" && !seen[repo] {
+			seen[repo] = true
+			repos = append(repos, repo)
+		}
+	}
+
+	// URLs first (often the canonical project page on HF)
+	for _, u := range entry.URLs {
+		addRepo(parseHFURL(u))
+	}
+
+	// File URIs
+	var mappings []FileRepoMapping
+	for _, f := range entry.Files {
+		repo := extractRepoFromURI(f.URI)
+		addRepo(repo)
+		mappings = append(mappings, FileRepoMapping{
+			Filename: f.Filename,
+			Repo:     repo,
+		})
+	}
+
+	return repos, mappings
+}
+
+// ExtractHFRepo returns the first HF repo found in the entry.
+// Kept for backward compatibility; prefer ExtractHFRepos.
+func ExtractHFRepo(entry *GalleryEntry) string {
+	repos, _ := ExtractHFRepos(entry)
+	if len(repos) > 0 {
+		return repos[0]
+	}
 	return ""
 }
 

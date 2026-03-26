@@ -34,6 +34,15 @@ type Config struct {
 	gallery     []GalleryEntry  // cached gallery entries (loaded once)
 }
 
+// RepoInfo holds fetched metadata for a single HuggingFace repo.
+type RepoInfo struct {
+	RepoID   string            `json:"repo_id"`
+	Metadata *HFModelInfo      `json:"metadata,omitempty"`
+	Readme   string            `json:"readme,omitempty"`
+	FileSHAs map[string]string `json:"file_shas"`
+	Error    string            `json:"error,omitempty"`
+}
+
 // RegisterHandlers registers all gallery check action handlers on the registry.
 func RegisterHandlers(registry *behtree.ActionRegistry, cfg *Config) {
 	cfg.processed = make(map[string]bool)
@@ -59,6 +68,7 @@ func ResumeFromDir(cfg *Config) error {
 			Name:          r.Name,
 			EntryIndex:    r.EntryIndex,
 			HFRepo:        r.HFRepo,
+			HFRepos:       r.HFRepos,
 			Findings:      r.Findings,
 			FileResults:   r.FileResults,
 			SafetyOK:      r.SafetyOK,
@@ -112,13 +122,13 @@ func scanGalleryHandler(cfg *Config) behtree.Handler {
 				continue
 			}
 
-			hfRepo := ExtractHFRepo(&entry)
-			if hfRepo == "" {
+			repos, fileMappings := ExtractHFRepos(&entry)
+			if len(repos) == 0 {
 				continue // skip entries without HF URLs
 			}
 
 			if cfg.Verbose {
-				log.Printf("ScanGallery: selected model %q (entry #%d, HF: %s)", entry.Name, i, hfRepo)
+				log.Printf("ScanGallery: selected model %q (entry #%d, HF repos: %v)", entry.Name, i, repos)
 			}
 
 			// Store model data in state
@@ -127,7 +137,13 @@ func scanGalleryHandler(cfg *Config) behtree.Handler {
 			_ = s.Set("model_check", "files_verified", "false")
 			_ = s.Set("model_check", "name", entry.Name)
 			_ = s.Set("model_check", "entry_index", i)
-			_ = s.Set("model_check", "hf_repo", hfRepo)
+			_ = s.Set("model_check", "hf_repo", repos[0])
+
+			reposJSON, _ := json.Marshal(repos)
+			_ = s.Set("model_check", "hf_repos", string(reposJSON))
+
+			mappingsJSON, _ := json.Marshal(fileMappings)
+			_ = s.Set("model_check", "file_repo_mappings", string(mappingsJSON))
 
 			entryJSON, _ := json.Marshal(entry)
 			_ = s.Set("model_check", "current_entry", string(entryJSON))
@@ -150,77 +166,107 @@ func fetchModelInfoHandler(cfg *Config) behtree.Handler {
 			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 		}
 
-		hfRepo, _ := s.Get("model_check", "hf_repo")
-		repoID, ok := hfRepo.(string)
-		if !ok || repoID == "" {
-			return behtree.HandlerResult{Status: behtree.Failure, Compatible: false}
-		}
-
 		name, _ := s.Get("model_check", "name")
-		if cfg.Verbose {
-			log.Printf("FetchModelInfo: fetching metadata for %s (HF: %s)", name, repoID)
-		}
 
 		if cfg.DryRun {
 			_ = s.Set("model_check", "info_fetched", "true")
 			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
 		}
 
-		// Fetch model metadata from HF API
-		info, err := cfg.HF.GetModelInfo(repoID)
-		if err != nil {
-			var httpErr *HTTPError
-			if errors.As(err, &httpErr) && httpErr.StatusCode == 401 {
-				log.Printf("FetchModelInfo: %s inaccessible (HTTP 401), marking for deletion", name)
-				markForDeletion(cfg, s, repoID, "HF repo returned 401 (private or removed)")
-				return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
-			}
-			log.Printf("FetchModelInfo: %v", err)
-			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
+		// Load repo list
+		var repos []string
+		if raw, _ := s.Get("model_check", "hf_repos"); raw != nil {
+			_ = json.Unmarshal([]byte(raw.(string)), &repos)
 		}
-
-		infoJSON, _ := json.Marshal(info)
-		_ = s.Set("model_check", "hf_metadata", string(infoJSON))
-
-		// Fetch README/model card
-		readme, err := cfg.HF.GetReadme(repoID)
-		if err != nil {
-			if cfg.Verbose {
-				log.Printf("FetchModelInfo: README not available: %v", err)
-			}
-			readme = ""
-		}
-		// Truncate to reasonable size for state storage
-		if len(readme) > 8000 {
-			readme = readme[:8000]
-		}
-		_ = s.Set("model_check", "hf_model_card", readme)
-
-		// Fetch file list with SHA256 hashes
-		files, err := cfg.HF.ListFiles(repoID)
-		if err != nil {
-			log.Printf("FetchModelInfo: failed to list files: %v", err)
-			// Non-fatal: we can still check other metadata
-			_ = s.Set("model_check", "hf_file_shas", "{}")
-		} else {
-			shaMap := make(map[string]string)
-			for _, f := range files {
-				if f.LFS != nil && f.LFS.Oid != "" {
-					shaMap[filepath.Base(f.Path)] = f.LFS.Oid
+		if len(repos) == 0 {
+			// Fallback to single repo for backwards compat
+			if r, _ := s.Get("model_check", "hf_repo"); r != nil {
+				if rid, ok := r.(string); ok && rid != "" {
+					repos = []string{rid}
 				}
 			}
-			shaJSON, _ := json.Marshal(shaMap)
-			_ = s.Set("model_check", "hf_file_shas", string(shaJSON))
+		}
+		if len(repos) == 0 {
+			return behtree.HandlerResult{Status: behtree.Failure, Compatible: false}
 		}
 
+		if cfg.Verbose {
+			log.Printf("FetchModelInfo: fetching metadata for %s (HF repos: %v)", name, repos)
+		}
+
+		allRepoInfo := make(map[string]*RepoInfo, len(repos))
+		allFailed := true
+		for _, repoID := range repos {
+			ri := fetchSingleRepoInfo(cfg, repoID)
+			allRepoInfo[repoID] = ri
+			if ri.Metadata != nil {
+				allFailed = false
+			}
+		}
+
+		// If all repos failed with 401, mark for deletion
+		if allFailed {
+			log.Printf("FetchModelInfo: %s all repos inaccessible, marking for deletion", name)
+			markForDeletion(cfg, s, repos[0], "all HF repos returned errors")
+			return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
+		}
+
+		allInfoJSON, _ := json.Marshal(allRepoInfo)
+		_ = s.Set("model_check", "all_repo_info", string(allInfoJSON))
 		_ = s.Set("model_check", "info_fetched", "true")
 
 		if cfg.Verbose {
-			log.Printf("FetchModelInfo: done for %s", name)
+			log.Printf("FetchModelInfo: done for %s (%d repos fetched)", name, len(repos))
 		}
 
 		return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
 	}
+}
+
+func fetchSingleRepoInfo(cfg *Config, repoID string) *RepoInfo {
+	ri := &RepoInfo{RepoID: repoID, FileSHAs: make(map[string]string)}
+
+	info, err := cfg.HF.GetModelInfo(repoID)
+	if err != nil {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == 401 {
+			ri.Error = "HTTP 401 (private or removed)"
+		} else {
+			ri.Error = err.Error()
+		}
+		if cfg.Verbose {
+			log.Printf("FetchModelInfo: %s: %v", repoID, err)
+		}
+		return ri
+	}
+	ri.Metadata = info
+
+	readme, err := cfg.HF.GetReadme(repoID)
+	if err != nil {
+		if cfg.Verbose {
+			log.Printf("FetchModelInfo: %s README not available: %v", repoID, err)
+		}
+	} else {
+		if len(readme) > 8000 {
+			readme = readme[:8000]
+		}
+		ri.Readme = readme
+	}
+
+	files, err := cfg.HF.ListFiles(repoID)
+	if err != nil {
+		if cfg.Verbose {
+			log.Printf("FetchModelInfo: %s failed to list files: %v", repoID, err)
+		}
+	} else {
+		for _, f := range files {
+			if f.LFS != nil && f.LFS.Oid != "" {
+				ri.FileSHAs[filepath.Base(f.Path)] = f.LFS.Oid
+			}
+		}
+	}
+
+	return ri
 }
 
 func verifyFilesHandler(cfg *Config) behtree.Handler {
@@ -230,7 +276,6 @@ func verifyFilesHandler(cfg *Config) behtree.Handler {
 		}
 
 		name, _ := s.Get("model_check", "name")
-		hfRepo, _ := s.Get("model_check", "hf_repo")
 		if cfg.Verbose {
 			log.Printf("VerifyFiles: checking files for %s", name)
 		}
@@ -248,61 +293,32 @@ func verifyFilesHandler(cfg *Config) behtree.Handler {
 			return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
 		}
 
-		// Load HF file SHAs
-		shaJSON, _ := s.Get("model_check", "hf_file_shas")
-		var hfSHAs map[string]string
-		if str, ok := shaJSON.(string); ok && str != "" {
-			_ = json.Unmarshal([]byte(str), &hfSHAs)
+		var fileMappings []FileRepoMapping
+		if raw, _ := s.Get("model_check", "file_repo_mappings"); raw != nil {
+			_ = json.Unmarshal([]byte(raw.(string)), &fileMappings)
 		}
-		if hfSHAs == nil {
-			hfSHAs = make(map[string]string)
-		}
-
-		var results []FileCheckResult
-		for _, f := range entry.Files {
-			result := FileCheckResult{
-				Filename:    f.Filename,
-				URI:         f.URI,
-				ExpectedSHA: f.SHA256,
-			}
-
-			// Check SHA256 against HF metadata (fetched by FetchModelInfo)
-			baseName := filepath.Base(f.Filename)
-			if hfSHA, ok := hfSHAs[baseName]; ok {
-				result.ActualSHA = hfSHA
-				result.SHAMatch = strings.EqualFold(f.SHA256, hfSHA)
-			} else {
-				result.Error = "no HF SHA available for this file"
-			}
-
-			// Check URI accessibility
-			accessible, statusCode, err := cfg.HF.CheckFileAccessible(f.URI)
-			result.Accessible = accessible
-			result.StatusCode = statusCode
-			if err != nil {
-				result.Error = fmt.Sprintf("accessibility: %v", err)
-			}
-
-			results = append(results, result)
+		fileToRepo := make(map[string]string, len(fileMappings))
+		for _, fm := range fileMappings {
+			fileToRepo[fm.Filename] = fm.Repo
 		}
 
+		allRepoInfo := make(map[string]*RepoInfo)
+		if raw, _ := s.Get("model_check", "all_repo_info"); raw != nil {
+			_ = json.Unmarshal([]byte(raw.(string)), &allRepoInfo)
+		}
+
+		results := verifyEntryFiles(cfg.HF, &entry, fileToRepo, allRepoInfo)
 		resultsJSON, _ := json.Marshal(results)
 		_ = s.Set("model_check", "file_results", string(resultsJSON))
 
-		// Safety scan
-		repoID := hfRepo.(string)
-		scan, err := cfg.HF.SafetyScan(repoID)
-		if err != nil {
-			if cfg.Verbose {
-				log.Printf("VerifyFiles: safety scan unavailable: %v", err)
-			}
-			_ = s.Set("model_check", "safety_ok", "unknown")
-		} else if scan.HasUnsafeFile {
-			_ = s.Set("model_check", "safety_ok", "false")
-			_ = s.Set("model_check", "safety_note", fmt.Sprintf("unsafe files detected: clamav=%v pickles=%v",
-				scan.ClamAVInfectedFiles, scan.DangerousPickles))
-		} else {
-			_ = s.Set("model_check", "safety_ok", "true")
+		var repos []string
+		if raw, _ := s.Get("model_check", "hf_repos"); raw != nil {
+			_ = json.Unmarshal([]byte(raw.(string)), &repos)
+		}
+		ok, note := runSafetyScans(cfg, repos)
+		_ = s.Set("model_check", "safety_ok", ok)
+		if note != "" {
+			_ = s.Set("model_check", "safety_note", note)
 		}
 
 		_ = s.Set("model_check", "files_verified", "true")
@@ -313,6 +329,120 @@ func verifyFilesHandler(cfg *Config) behtree.Handler {
 
 		return behtree.HandlerResult{Status: behtree.Success, Compatible: true}
 	}
+}
+
+func verifyEntryFiles(
+	hf *HFClient, entry *GalleryEntry,
+	fileToRepo map[string]string, allRepoInfo map[string]*RepoInfo,
+) []FileCheckResult {
+	var results []FileCheckResult
+	for _, f := range entry.Files {
+		result := FileCheckResult{
+			Filename:    f.Filename,
+			URI:         f.URI,
+			ExpectedSHA: f.SHA256,
+		}
+
+		repo := fileToRepo[f.Filename]
+		if repo == "" {
+			repo = extractRepoFromURI(f.URI)
+		}
+		result.SourceRepo = repo
+
+		if repo != "" {
+			if ri, ok := allRepoInfo[repo]; ok && ri.FileSHAs != nil {
+				baseName := filepath.Base(f.Filename)
+				if hfSHA, ok := ri.FileSHAs[baseName]; ok {
+					result.ActualSHA = hfSHA
+					result.SHAMatch = strings.EqualFold(f.SHA256, hfSHA)
+				} else {
+					result.Error = fmt.Sprintf("file not found in %s file listing", repo)
+				}
+			} else if ri != nil && ri.Error != "" {
+				result.Error = fmt.Sprintf("repo %s: %s", repo, ri.Error)
+			} else {
+				result.Error = fmt.Sprintf("no metadata for repo %s", repo)
+			}
+		} else {
+			result.Error = "no HF repo could be determined for this file"
+		}
+
+		accessible, statusCode, err := hf.CheckFileAccessible(f.URI)
+		result.Accessible = accessible
+		result.StatusCode = statusCode
+		if err != nil {
+			result.Error = fmt.Sprintf("accessibility: %v", err)
+		}
+
+		results = append(results, result)
+	}
+	return results
+}
+
+// runSafetyScans runs safety scans on all repos, returns (status, note).
+func runSafetyScans(cfg *Config, repos []string) (string, string) {
+	safetyOK := true
+	var notes []string
+	for _, repoID := range repos {
+		scan, err := cfg.HF.SafetyScan(repoID)
+		if err != nil {
+			if cfg.Verbose {
+				log.Printf("VerifyFiles: %s safety scan unavailable: %v", repoID, err)
+			}
+			notes = append(notes, fmt.Sprintf("%s: scan unavailable", repoID))
+			continue
+		}
+		if scan.HasUnsafeFile {
+			safetyOK = false
+			notes = append(notes, fmt.Sprintf("%s: clamav=%v pickles=%v",
+				repoID, scan.ClamAVInfectedFiles, scan.DangerousPickles))
+		}
+	}
+
+	note := strings.Join(notes, "; ")
+	if !safetyOK {
+		return "false", note
+	}
+	if len(notes) > 0 {
+		return "unknown", note
+	}
+	return "true", ""
+}
+
+type synthesisState struct {
+	entry       GalleryEntry
+	repos       []string
+	allRepoInfo map[string]*RepoInfo
+	hfInfo      HFModelInfo
+	fileResults []FileCheckResult
+}
+
+func loadSynthesisState(s *behtree.State) synthesisState {
+	var st synthesisState
+
+	entryJSON, _ := s.Get("model_check", "current_entry")
+	_ = json.Unmarshal([]byte(entryJSON.(string)), &st.entry)
+
+	if raw, _ := s.Get("model_check", "hf_repos"); raw != nil {
+		_ = json.Unmarshal([]byte(raw.(string)), &st.repos)
+	}
+	st.allRepoInfo = make(map[string]*RepoInfo)
+	if raw, _ := s.Get("model_check", "all_repo_info"); raw != nil {
+		_ = json.Unmarshal([]byte(raw.(string)), &st.allRepoInfo)
+	}
+	// Derive hfInfo from first successful repo in allRepoInfo
+	for _, repoID := range st.repos {
+		if ri, ok := st.allRepoInfo[repoID]; ok && ri.Metadata != nil {
+			st.hfInfo = *ri.Metadata
+			break
+		}
+	}
+	if frJSON, _ := s.Get("model_check", "file_results"); frJSON != nil {
+		if str, ok := frJSON.(string); ok {
+			_ = json.Unmarshal([]byte(str), &st.fileResults)
+		}
+	}
+	return st
 }
 
 func synthesizeUpdateHandler(cfg *Config) behtree.Handler {
@@ -329,33 +459,14 @@ func synthesizeUpdateHandler(cfg *Config) behtree.Handler {
 			log.Printf("SynthesizeUpdate: generating report for %s", name)
 		}
 
-		// Load current entry
-		entryJSON, _ := s.Get("model_check", "current_entry")
-		var entry GalleryEntry
-		_ = json.Unmarshal([]byte(entryJSON.(string)), &entry)
+		st := loadSynthesisState(s)
 
-		// Load HF metadata
-		var hfInfo HFModelInfo
-		if metaJSON, _ := s.Get("model_check", "hf_metadata"); metaJSON != nil {
-			if str, ok := metaJSON.(string); ok {
-				_ = json.Unmarshal([]byte(str), &hfInfo)
-			}
-		}
-
-		// Load file results
-		var fileResults []FileCheckResult
-		if frJSON, _ := s.Get("model_check", "file_results"); frJSON != nil {
-			if str, ok := frJSON.(string); ok {
-				_ = json.Unmarshal([]byte(str), &fileResults)
-			}
-		}
-
-		// Build report
 		report := &ModelReport{
-			Name:        entry.Name,
+			Name:        st.entry.Name,
 			EntryIndex:  entryIdx.(int),
 			HFRepo:      hfRepo.(string),
-			FileResults: fileResults,
+			HFRepos:     st.repos,
+			FileResults: st.fileResults,
 		}
 
 		// Safety
@@ -377,11 +488,7 @@ func synthesizeUpdateHandler(cfg *Config) behtree.Handler {
 		// Call LLM for tag/usecase/description suggestions (if configured)
 		var llmSuggestion *LLMSuggestion
 		if cfg.LLM != nil && !cfg.DryRun {
-			modelCard := ""
-			if mc, _ := s.Get("model_check", "hf_model_card"); mc != nil {
-				modelCard, _ = mc.(string)
-			}
-			suggestion, llmErr := callLLM(cfg, &entry, modelCard, &hfInfo)
+			suggestion, llmErr := callLLM(cfg, &st.entry, st.allRepoInfo, st.repos)
 			if llmErr != nil {
 				log.Printf("SynthesizeUpdate: LLM call failed: %v", llmErr)
 				return behtree.HandlerResult{Status: behtree.Failure, Compatible: true}
@@ -389,10 +496,23 @@ func synthesizeUpdateHandler(cfg *Config) behtree.Handler {
 			llmSuggestion = suggestion
 		}
 
-		// Generate findings and proposed entry (automated + LLM-assisted if available)
-		report.Findings, report.ProposedEntry = generateFindings(&entry, &hfInfo, cfg.DryRun, llmSuggestion)
+		// Select primary repo's metadata for generateFindings
+		primaryHF := &st.hfInfo
+		if llmSuggestion != nil && llmSuggestion.PrimaryRepo != "" {
+			for _, r := range st.repos {
+				if r == llmSuggestion.PrimaryRepo {
+					if ri, ok := st.allRepoInfo[r]; ok && ri.Metadata != nil {
+						primaryHF = ri.Metadata
+					}
+					report.HFRepo = r
+					break
+				}
+			}
+		}
 
-		recordReport(cfg, report, &entry)
+		report.Findings, report.ProposedEntry = generateFindings(&st.entry, primaryHF, cfg.DryRun, llmSuggestion)
+
+		recordReport(cfg, report, &st.entry)
 
 		if cfg.Verbose {
 			log.Printf("SynthesizeUpdate: report generated for %s (%d findings)", name, len(report.Findings))
@@ -447,6 +567,7 @@ func recordReport(cfg *Config, report *ModelReport, original *GalleryEntry) {
 			Name:          report.Name,
 			EntryIndex:    report.EntryIndex,
 			HFRepo:        report.HFRepo,
+			HFRepos:       report.HFRepos,
 			Findings:      report.Findings,
 			FileResults:   report.FileResults,
 			SafetyOK:      report.SafetyOK,
@@ -720,30 +841,68 @@ Tags are free-form but should be drawn from these categories:
 
 Keep tags lowercase. Include 5-12 relevant tags. Do NOT include HuggingFace-internal tags
 like "transformers", "safetensors", "pytorch" unless they indicate the LocalAI backend.
-Do NOT include the license as a tag.`
+Do NOT include the license as a tag.
+
+## Primary Repo Selection
+
+When the entry references files from multiple HuggingFace repos, identify which repo is
+the PRIMARY model — the one that defines the entry's core purpose. Output its repo ID
+in the "primary_repo" field.
+
+Heuristics:
+- The entry name and description describe the primary model's purpose
+- Auxiliary components (text encoders, VAEs, tokenizers, autoencoders) are NOT the primary
+- The primary repo's pipeline_tag should match the entry's purpose (e.g., image model → text-to-image)
+- If there is only one repo, use that
+
+Always output "primary_repo" even for single-repo entries.
+Base your tags, usecases, and description on the PRIMARY model, not auxiliary components.`
 
 // LLMSuggestion is the JSON structure expected from the LLM.
 type LLMSuggestion struct {
+	PrimaryRepo   string   `json:"primary_repo"`
 	Tags          []string `json:"tags"`
 	KnownUsecases []string `json:"known_usecases"`
 	Description   string   `json:"description"`
 }
 
-// callLLM asks the LLM to suggest tags, usecases, and description from the model card.
-func callLLM(cfg *Config, entry *GalleryEntry, modelCard string, hf *HFModelInfo) (*LLMSuggestion, error) {
-	if cfg.LLM == nil {
-		return nil, nil
+func formatRepoSections(allRepoInfo map[string]*RepoInfo, repos []string) string {
+	var b strings.Builder
+	maxCardChars := 8000 / max(len(repos), 1)
+	for _, repoID := range repos {
+		ri := allRepoInfo[repoID]
+		if ri == nil {
+			continue
+		}
+		fmt.Fprintf(&b, "\n### Repo: %s\n", repoID)
+		if ri.Error != "" {
+			fmt.Fprintf(&b, "Error: %s\n", ri.Error)
+			continue
+		}
+		if ri.Metadata != nil {
+			fmt.Fprintf(&b, "Pipeline: %s\n", ri.Metadata.PipelineTag)
+			fmt.Fprintf(&b, "Tags: %s\n", strings.Join(ri.Metadata.Tags, ", "))
+		}
+		if ri.Readme != "" {
+			excerpt := ri.Readme
+			if len(excerpt) > maxCardChars {
+				excerpt = excerpt[:maxCardChars]
+			}
+			lines := strings.Split(excerpt, "\n")
+			if len(lines) > 80 {
+				lines = lines[:80]
+			}
+			fmt.Fprintf(&b, "Model card excerpt:\n%s\n", strings.Join(lines, "\n"))
+		}
 	}
+	return b.String()
+}
 
-	// Take first ~100 lines of model card
-	lines := strings.Split(modelCard, "\n")
-	if len(lines) > 100 {
-		lines = lines[:100]
-	}
-	cardExcerpt := strings.Join(lines, "\n")
+// buildLLMUserPrompt constructs the user prompt for model metadata synthesis.
+func buildLLMUserPrompt(entry *GalleryEntry, allRepoInfo map[string]*RepoInfo, repos []string) string {
+	const none = "none"
 
-	// Build user prompt with current entry info and model card
-	currentTags := "none"
+	currentTags := none
 	if len(entry.Tags) > 0 {
 		currentTags = strings.Join(entry.Tags, ", ")
 	}
@@ -754,7 +913,7 @@ func callLLM(cfg *Config, entry *GalleryEntry, modelCard string, hf *HFModelInfo
 		}
 	}
 	if currentDesc == "" {
-		currentDesc = "none"
+		currentDesc = none
 	}
 
 	var currentUsecases string
@@ -768,13 +927,19 @@ func callLLM(cfg *Config, entry *GalleryEntry, modelCard string, hf *HFModelInfo
 		}
 	}
 	if currentUsecases == "" {
-		currentUsecases = "none"
+		currentUsecases = none
 	}
 
-	userPrompt := fmt.Sprintf(`## Model: %s
-HuggingFace repo: %s
-HF tags: %s
-HF pipeline: %s
+	var fileMappings strings.Builder
+	for _, f := range entry.Files {
+		repo := extractRepoFromURI(f.URI)
+		if repo == "" {
+			repo = "(non-HF)"
+		}
+		fmt.Fprintf(&fileMappings, "- %s → %s\n", f.Filename, repo)
+	}
+
+	return fmt.Sprintf(`## Model: %s
 
 ## Current gallery entry
 Tags: %s
@@ -782,18 +947,28 @@ Description: %s
 Known usecases: %s
 Backend: %s
 
-## Model card excerpt
+## HuggingFace Repos (%d repos referenced)
+%s
+### File → Repo mapping
 %s`,
 		entry.Name,
-		hf.ModelID,
-		strings.Join(hf.Tags, ", "),
-		hf.PipelineTag,
 		currentTags,
 		truncateStr(currentDesc, 200),
 		currentUsecases,
 		fmt.Sprint(entry.Overrides["backend"]),
-		cardExcerpt,
+		len(repos),
+		formatRepoSections(allRepoInfo, repos),
+		fileMappings.String(),
 	)
+}
+
+// callLLM asks the LLM to suggest primary repo, tags, usecases, and description.
+func callLLM(cfg *Config, entry *GalleryEntry, allRepoInfo map[string]*RepoInfo, repos []string) (*LLMSuggestion, error) {
+	if cfg.LLM == nil {
+		return nil, nil
+	}
+
+	userPrompt := buildLLMUserPrompt(entry, allRepoInfo, repos)
 
 	req := openai.ChatCompletionRequest{
 		Model:     cfg.LLMModel,

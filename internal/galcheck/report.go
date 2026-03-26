@@ -20,6 +20,7 @@ type Finding struct {
 type FileCheckResult struct {
 	Filename    string `json:"filename"`
 	URI         string `json:"uri"`
+	SourceRepo  string `json:"source_repo,omitempty"`
 	SHAMatch    bool   `json:"sha_match"`
 	Accessible  bool   `json:"accessible"`
 	ExpectedSHA string `json:"expected_sha"`
@@ -32,6 +33,7 @@ type ModelReport struct {
 	Name          string            `json:"name"`
 	EntryIndex    int               `json:"entry_index"`
 	HFRepo        string            `json:"hf_repo"`
+	HFRepos       []string          `json:"hf_repos,omitempty"`
 	Findings      []Finding         `json:"findings"`
 	FileResults   []FileCheckResult `json:"file_results"`
 	SafetyOK      bool              `json:"safety_ok"`
@@ -47,7 +49,16 @@ func (r *ModelReport) HasChanges() bool {
 func WriteReport(w io.Writer, report *ModelReport) {
 	fmt.Fprintf(w, "## %s (entry #%d)\n\n", report.Name, report.EntryIndex)
 
-	if report.HFRepo != "" {
+	if len(report.HFRepos) > 1 {
+		fmt.Fprintf(w, "HuggingFace repos: %s (primary)", report.HFRepo)
+		for _, r := range report.HFRepos {
+			if r != report.HFRepo {
+				fmt.Fprintf(w, ", %s", r)
+			}
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w)
+	} else if report.HFRepo != "" {
 		fmt.Fprintf(w, "HuggingFace repo: %s\n\n", report.HFRepo)
 	}
 
@@ -172,6 +183,7 @@ type PersistentReport struct {
 	Name          string            `json:"name"`
 	EntryIndex    int               `json:"entry_index"`
 	HFRepo        string            `json:"hf_repo"`
+	HFRepos       []string          `json:"hf_repos,omitempty"`
 	Findings      []Finding         `json:"findings"`
 	FileResults   []FileCheckResult `json:"file_results"`
 	SafetyOK      bool              `json:"safety_ok"`
@@ -206,6 +218,7 @@ func WriteReportFiles(dir string, report *PersistentReport) error {
 		Name:          report.Name,
 		EntryIndex:    report.EntryIndex,
 		HFRepo:        report.HFRepo,
+		HFRepos:       report.HFRepos,
 		Findings:      report.Findings,
 		FileResults:   report.FileResults,
 		SafetyOK:      report.SafetyOK,
