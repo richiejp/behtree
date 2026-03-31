@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gallery Check Review</title>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; display: flex; height: 100vh; color: #e0e0e0; background: #1a1a2e; }
+
+  /* Left panel */
+  .sidebar { width: 320px; border-right: 1px solid #333; display: flex; flex-direction: column; background: #16213e; }
+  .sidebar-header { padding: 12px; border-bottom: 1px solid #333; }
+  .sidebar-header h2 { font-size: 14px; margin-bottom: 8px; color: #a0a0a0; }
+  .sidebar-header input, .sidebar-header select {
+    width: 100%; padding: 6px 8px; border: 1px solid #444; border-radius: 4px;
+    font-size: 13px; background: #1a1a2e; color: #e0e0e0; margin-bottom: 4px;
+  }
+  .sidebar-header select { margin-top: 4px; }
+  .sidebar-header .counts { font-size: 11px; color: #888; margin-top: 4px; }
+  .model-list { flex: 1; overflow-y: auto; }
+  .model-item {
+    padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #222;
+    display: flex; align-items: center; gap: 8px; font-size: 13px;
+  }
+  .model-item:hover { background: #1a1a3e; }
+  .model-item.selected { background: #0f3460; }
+  .model-item .icon { width: 16px; text-align: center; flex-shrink: 0; }
+  .model-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .model-item .badge { font-size: 11px; color: #888; flex-shrink: 0; }
+  .icon-pending { color: #888; }
+  .icon-approved { color: #4caf50; }
+  .icon-rejected { color: #f44336; }
+
+  /* Right panel */
+  .detail { flex: 1; overflow-y: auto; padding: 20px; }
+  .detail-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: #666; }
+  .detail h1 { font-size: 18px; margin-bottom: 4px; }
+  .detail .meta { font-size: 13px; color: #888; margin-bottom: 16px; }
+  .detail .meta a { color: #64b5f6; }
+
+  /* Status + actions bar */
+  .actions-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .actions-bar select, .actions-bar button {
+    padding: 6px 12px; border-radius: 4px; font-size: 13px; cursor: pointer;
+    border: 1px solid #444; background: #1a1a2e; color: #e0e0e0;
+  }
+  .actions-bar button:hover { background: #0f3460; }
+  .actions-bar .btn-save { background: #1b5e20; border-color: #2e7d32; }
+  .actions-bar .btn-save:hover { background: #2e7d32; }
+  .actions-bar .btn-save:disabled { opacity: 0.5; cursor: default; }
+
+  /* Findings table */
+  .findings { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+  .findings th { text-align: left; padding: 8px; border-bottom: 2px solid #333; font-size: 12px; color: #888; }
+  .findings td { padding: 8px; border-bottom: 1px solid #222; font-size: 13px; vertical-align: top; }
+  .findings .current { color: #ef9a9a; }
+  .findings .proposed { color: #a5d6a7; }
+  .findings .source { color: #888; font-size: 12px; }
+  .findings .toggle-group { display: flex; gap: 2px; }
+  .findings .toggle-btn {
+    padding: 2px 8px; border: 1px solid #444; border-radius: 3px; cursor: pointer;
+    font-size: 11px; background: #1a1a2e; color: #888;
+  }
+  .findings .toggle-btn.active-accept { background: #1b5e20; color: #fff; border-color: #2e7d32; }
+  .findings .toggle-btn.active-reject { background: #b71c1c; color: #fff; border-color: #c62828; }
+
+  /* File results */
+  .section-title { font-size: 14px; font-weight: 600; margin: 16px 0 8px; color: #a0a0a0; }
+  .file-results { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+  .file-results th { text-align: left; padding: 6px 8px; border-bottom: 2px solid #333; font-size: 12px; color: #888; }
+  .file-results td { padding: 6px 8px; border-bottom: 1px solid #222; font-size: 12px; }
+  .ok { color: #4caf50; }
+  .fail { color: #f44336; }
+  .safety-ok { color: #4caf50; font-weight: 600; }
+  .safety-fail { color: #f44336; font-weight: 600; }
+
+  /* Segmented control */
+  .segmented-control { display: inline-flex; border: 1px solid #444; border-radius: 4px; overflow: hidden; }
+  .segmented-control button {
+    padding: 6px 14px; font-size: 13px; cursor: pointer;
+    border: none; border-right: 1px solid #444; background: #1a1a2e; color: #888;
+  }
+  .segmented-control button:last-child { border-right: none; }
+  .segmented-control button:hover { background: #1a1a3e; }
+  .seg-active { background: #333 !important; color: #e0e0e0 !important; }
+  .seg-active-approve { background: #1b5e20 !important; color: #fff !important; }
+  .seg-active-reject { background: #b71c1c !important; color: #fff !important; }
+</style>
+</head>
+<body x-data="app()" x-init="loadReports()">
+
+<!-- Left panel: model list -->
+<div class="sidebar">
+  <div class="sidebar-header">
+    <h2>Gallery Check Review</h2>
+    <input type="text" placeholder="Search models..." x-model="search">
+    <select x-model="filter">
+      <option value="all">All</option>
+      <option value="pending">Pending</option>
+      <option value="approved">Approved</option>
+      <option value="rejected">Rejected</option>
+    </select>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+      <label style="font-size:11px;color:#888;">
+        <input type="checkbox" x-model="sortEnabled"> Sort:
+      </label>
+      <span style="font-size:10px;color:#888;">Age</span>
+      <input type="range" min="0" max="1" step="0.05" x-model.number="sortWeight"
+             :disabled="!sortEnabled" style="flex:1;">
+      <span style="font-size:10px;color:#888;">Pop</span>
+    </div>
+    <div class="counts" x-text="filteredReports.length + ' / ' + reports.length + ' models'"></div>
+  </div>
+  <div class="model-list">
+    <template x-for="r in filteredReports" :key="r.name">
+      <div class="model-item" :class="{'selected': selectedName === r.name}" @click="selectReport(r.name)">
+        <span class="icon" :class="statusIconClass(r.review_status)">
+          <span x-text="statusIcon(r.review_status)"></span>
+        </span>
+        <span class="name" x-text="r.name"></span>
+        <span class="badge" x-text="r.finding_count + ' findings'"></span>
+      </div>
+    </template>
+  </div>
+</div>
+
+<!-- Right panel: detail view -->
+<div class="detail">
+  <template x-if="!selected">
+    <div class="detail-empty">Select a model from the list</div>
+  </template>
+  <template x-if="selected">
+    <div>
+      <h1 x-text="selected.name"></h1>
+      <div class="meta">
+        <template x-if="selected.hf_repo">
+          <span>HF: <a :href="'https://huggingface.co/' + selected.hf_repo" target="_blank" x-text="selected.hf_repo"></a></span>
+        </template>
+        <span x-show="selected.checked_at"> &middot; Checked: <span x-text="selected.checked_at"></span></span>
+        <span x-show="selected.downloads"> &middot; <span x-text="selected.downloads.toLocaleString()"></span> downloads/month</span>
+        <span x-show="selected.last_modified_hf"> &middot; HF updated: <span x-text="selected.last_modified_hf.slice(0,10)"></span></span>
+        <span> &middot; Safety: <span :class="selected.safety_ok ? 'safety-ok' : 'safety-fail'" x-text="selected.safety_ok ? 'OK' : 'FAIL'"></span></span>
+        <template x-if="selected.safety_note">
+          <span x-text="' (' + selected.safety_note + ')'"></span>
+        </template>
+      </div>
+
+      <!-- Actions bar -->
+      <div class="actions-bar">
+        <div class="segmented-control">
+          <button :class="{'seg-active': !selected.review_status}"
+                  @click="selected.review_status = ''; dirty = true">Pending</button>
+          <button :class="{'seg-active-approve': selected.review_status === 'approved'}"
+                  @click="selected.review_status = 'approved'; dirty = true">Approved</button>
+          <button :class="{'seg-active-reject': selected.review_status === 'rejected'}"
+                  @click="selected.review_status = 'rejected'; dirty = true">Rejected</button>
+        </div>
+        <button @click="acceptAll()">Accept All</button>
+        <button @click="rejectAll()">Reject All</button>
+        <button class="btn-save" @click="saveReview()" :disabled="saving">
+          <span x-text="saving ? 'Saving...' : 'Save'"></span>
+        </button>
+        <span x-show="dirty" style="color:#ff9800;font-size:12px;">unsaved</span>
+      </div>
+
+      <!-- Findings -->
+      <template x-if="selected.findings && selected.findings.length > 0">
+        <table class="findings">
+          <thead><tr><th>Field</th><th>Current</th><th>Proposed</th><th>Source</th><th>Decision</th></tr></thead>
+          <tbody>
+            <template x-for="(f, i) in selected.findings" :key="i">
+              <tr>
+                <td><span x-text="f.field"></span><template x-if="f.target === 'config_file'"><span style="color:#64b5f6;font-size:11px;"> (config)</span></template></td>
+                <td class="current"><span x-text="truncSHA(f.current) || 'MISSING'"></span></td>
+                <td class="proposed"><span x-text="truncSHA(f.proposed)"></span></td>
+                <td class="source" x-text="f.source"></td>
+                <td>
+                  <div class="toggle-group">
+                    <button class="toggle-btn"
+                      :class="{'active-accept': f.accepted === true}"
+                      @click="setFinding(i, true)">Accept</button>
+                    <button class="toggle-btn"
+                      :class="{'active-reject': f.accepted === false}"
+                      @click="setFinding(i, false)">Reject</button>
+                  </div>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </template>
+
+      <!-- File results -->
+      <template x-if="selected.file_results && selected.file_results.length > 0">
+        <div>
+          <div class="section-title">File Checks</div>
+          <table class="file-results">
+            <thead><tr><th>File</th><th>Repo</th><th>SHA Match</th><th>Accessible</th><th>Error</th></tr></thead>
+            <tbody>
+              <template x-for="fr in selected.file_results" :key="fr.filename">
+                <tr>
+                  <td x-text="fr.filename.split('/').pop()"></td>
+                  <td x-text="fr.source_repo || '-'"></td>
+                  <td :class="fr.sha_match ? 'ok' : 'fail'" x-text="fr.sha_match ? 'Yes' : 'No'"></td>
+                  <td :class="fr.accessible ? 'ok' : 'fail'" x-text="fr.accessible ? 'Yes' : 'No'"></td>
+                  <td x-text="fr.error || ''"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </template>
+    </div>
+  </template>
+</div>
+
+<script>
+function app() {
+  return {
+    reports: [],
+    selected: null,
+    selectedName: '',
+    filter: 'all',
+    search: '',
+    saving: false,
+    dirty: false,
+    sortWeight: 0.5,
+    sortEnabled: false,
+
+    get filteredReports() {
+      let result = this.reports.filter(r => {
+        if (this.filter !== 'all') {
+          const status = r.review_status || 'pending';
+          if (status !== this.filter && !(this.filter === 'pending' && !r.review_status)) return false;
+        }
+        if (this.search && !r.name.toLowerCase().includes(this.search.toLowerCase())) return false;
+        return true;
+      });
+
+      if (this.sortEnabled) {
+        let maxDownloads = 1, maxAge = 1;
+        const now = Date.now();
+        for (const r of this.reports) {
+          if (r.downloads > maxDownloads) maxDownloads = r.downloads;
+          if (r.last_modified_hf) {
+            const age = (now - new Date(r.last_modified_hf).getTime()) / 86400000;
+            if (age > maxAge) maxAge = age;
+          }
+        }
+        const score = (r) => {
+          const pop = Math.min((r.downloads || 0) / maxDownloads, 1);
+          let age = 0;
+          if (r.last_modified_hf) {
+            const days = (now - new Date(r.last_modified_hf).getTime()) / 86400000;
+            age = Math.max(1 - days / maxAge, 0);
+          }
+          return this.sortWeight * pop + (1 - this.sortWeight) * age;
+        };
+        result.sort((a, b) => score(b) - score(a));
+      }
+
+      return result;
+    },
+
+    truncSHA(s) {
+      if (!s || s.length <= 16 || !/^[0-9a-f]+$/i.test(s)) return s;
+      return s.slice(0, 12) + '...';
+    },
+
+    statusIcon(status) {
+      if (status === 'approved') return '\u2714';
+      if (status === 'rejected') return '\u2718';
+      return '\u25CB';
+    },
+
+    statusIconClass(status) {
+      if (status === 'approved') return 'icon-approved';
+      if (status === 'rejected') return 'icon-rejected';
+      return 'icon-pending';
+    },
+
+    async loadReports() {
+      const resp = await fetch('/api/reports');
+      this.reports = await resp.json();
+    },
+
+    async selectReport(name) {
+      this.selectedName = name;
+      this.dirty = false;
+      const resp = await fetch('/api/reports/' + encodeURIComponent(name));
+      const data = await resp.json();
+      // Normalize findings: ensure accepted is proper boolean or null
+      if (data.findings) {
+        data.findings = data.findings.map(f => ({
+          ...f,
+          accepted: f.accepted === true ? true : f.accepted === false ? false : null,
+        }));
+      }
+      this.selected = data;
+    },
+
+    setFinding(index, accepted) {
+      this.selected.findings[index].accepted = accepted;
+      this.dirty = true;
+    },
+
+    acceptAll() {
+      if (!this.selected?.findings) return;
+      this.selected.findings.forEach(f => f.accepted = true);
+      this.dirty = true;
+    },
+
+    rejectAll() {
+      if (!this.selected?.findings) return;
+      this.selected.findings.forEach(f => f.accepted = false);
+      this.dirty = true;
+    },
+
+    async saveReview() {
+      if (!this.selected) return;
+      this.saving = true;
+
+      // If approving, auto-accept any still-pending findings
+      if (this.selected.review_status === 'approved') {
+        this.selected.findings?.forEach(f => {
+          if (f.accepted === null) f.accepted = true;
+        });
+      }
+
+      const body = {
+        review_status: this.selected.review_status || '',
+        findings: (this.selected.findings || []).map((f, i) => ({
+          index: i,
+          accepted: f.accepted === true,
+        })),
+      };
+
+      try {
+        const resp = await fetch('/api/reports/' + encodeURIComponent(this.selected.name), {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        this.dirty = false;
+
+        // Update summary list
+        const summary = this.reports.find(r => r.name === this.selected.name);
+        if (summary) summary.review_status = this.selected.review_status;
+      } catch (e) {
+        alert('Save failed: ' + e.message);
+      } finally {
+        this.saving = false;
+      }
+    },
+  };
+}
+</script>
+</body>
+</html>

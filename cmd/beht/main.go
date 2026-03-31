@@ -30,6 +30,9 @@ func main() {
 	case "trace":
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 		runTrace()
+	case "review":
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+		runReview()
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -49,5 +52,6 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  show        Display environment and tree from JSON files")
 	fmt.Fprintln(os.Stderr, "  trace       Query and display trace files")
 	fmt.Fprintln(os.Stderr, "  gallery-check  Check/apply gallery model metadata (resumable)")
+	fmt.Fprintln(os.Stderr, "  review      Review gallery-check reports in browser")
 	fmt.Fprintln(os.Stderr, "  help        Show this help")
 }
