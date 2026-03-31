@@ -10,11 +10,17 @@ import (
 	"strings"
 )
 
+// TargetConfigFile indicates a finding should be applied to the model's
+// config YAML rather than index.yaml.
+const TargetConfigFile = "config_file"
+
 type Finding struct {
 	Field    string `json:"field"`
 	Current  string `json:"current"`
 	Proposed string `json:"proposed"`
-	Source   string `json:"source"` // e.g., "HF metadata", "model card", "file check"
+	Source   string `json:"source"`           // e.g., "HF metadata", "model card", "file check"
+	Target   string `json:"target,omitempty"` // TargetConfigFile or "" (index.yaml)
+	Accepted *bool  `json:"accepted,omitempty"` // nil=pending, true=accepted, false=rejected
 }
 
 type FileCheckResult struct {
@@ -30,15 +36,17 @@ type FileCheckResult struct {
 }
 
 type ModelReport struct {
-	Name          string            `json:"name"`
-	EntryIndex    int               `json:"entry_index"`
-	HFRepo        string            `json:"hf_repo"`
-	HFRepos       []string          `json:"hf_repos,omitempty"`
-	Findings      []Finding         `json:"findings"`
-	FileResults   []FileCheckResult `json:"file_results"`
-	SafetyOK      bool              `json:"safety_ok"`
-	SafetyNote    string            `json:"safety_note,omitempty"`
-	ProposedEntry *GalleryEntry     `json:"proposed_entry,omitempty"`
+	Name           string            `json:"name"`
+	EntryIndex     int               `json:"entry_index"`
+	HFRepo         string            `json:"hf_repo"`
+	HFRepos        []string          `json:"hf_repos,omitempty"`
+	Findings       []Finding         `json:"findings"`
+	FileResults    []FileCheckResult `json:"file_results"`
+	SafetyOK       bool              `json:"safety_ok"`
+	SafetyNote     string            `json:"safety_note,omitempty"`
+	ProposedEntry  *GalleryEntry     `json:"proposed_entry,omitempty"`
+	Downloads      int               `json:"downloads,omitempty"`
+	HFLastModified string            `json:"last_modified_hf,omitempty"`
 }
 
 func (r *ModelReport) HasChanges() bool {
@@ -180,17 +188,21 @@ func ExtractLicense(tags []string) string {
 
 // PersistentReport is the on-disk format for a per-model report.
 type PersistentReport struct {
-	Name          string            `json:"name"`
-	EntryIndex    int               `json:"entry_index"`
-	HFRepo        string            `json:"hf_repo"`
-	HFRepos       []string          `json:"hf_repos,omitempty"`
-	Findings      []Finding         `json:"findings"`
-	FileResults   []FileCheckResult `json:"file_results"`
-	SafetyOK      bool              `json:"safety_ok"`
-	SafetyNote    string            `json:"safety_note,omitempty"`
-	OriginalEntry *GalleryEntry     `json:"original_entry"`
-	ProposedEntry *GalleryEntry     `json:"proposed_entry"`
-	CheckedAt     string            `json:"checked_at"`
+	Name           string            `json:"name"`
+	EntryIndex     int               `json:"entry_index"`
+	HFRepo         string            `json:"hf_repo"`
+	HFRepos        []string          `json:"hf_repos,omitempty"`
+	Findings       []Finding         `json:"findings"`
+	FileResults    []FileCheckResult `json:"file_results"`
+	SafetyOK       bool              `json:"safety_ok"`
+	SafetyNote     string            `json:"safety_note,omitempty"`
+	Downloads      int               `json:"downloads,omitempty"`
+	HFLastModified string            `json:"last_modified_hf,omitempty"`
+	OriginalEntry  *GalleryEntry     `json:"original_entry"`
+	ProposedEntry  *GalleryEntry     `json:"proposed_entry"`
+	CheckedAt      string            `json:"checked_at"`
+	ReviewStatus   string            `json:"review_status,omitempty"` // "approved", "rejected", or "" (pending)
+	ReviewedAt     string            `json:"reviewed_at,omitempty"`
 }
 
 // SanitizeFilename makes a model name safe for use as a filename.

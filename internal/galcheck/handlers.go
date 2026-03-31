@@ -579,7 +579,11 @@ func synthesizeUpdateHandler(cfg *Config) behtree.Handler {
 			}
 		}
 
-		report.Findings, report.ProposedEntry = generateFindings(&st.entry, primaryHF, cfg.DryRun, llmSuggestion)
+		report.Downloads = primaryHF.Downloads
+		report.HFLastModified = primaryHF.LastModified
+
+		configSettings := loadLocalConfigSettings(cfg, &st.entry)
+		report.Findings, report.ProposedEntry = generateFindings(&st.entry, primaryHF, cfg.DryRun, llmSuggestion, st.fileResults, configSettings)
 
 		recordReport(cfg, report, &st.entry)
 
@@ -626,6 +630,17 @@ func markForDeletion(cfg *Config, s *behtree.State, hfRepo, reason string) {
 	_ = s.Set("model_check", "files_verified", "false")
 }
 
+func loadLocalConfigSettings(cfg *Config, entry *GalleryEntry) *ConfigFileSettings {
+	if cfg.GalleryPath == "" {
+		return nil
+	}
+	settings, err := LoadConfigFileSettings(filepath.Dir(cfg.GalleryPath), entry)
+	if err != nil && cfg.Verbose {
+		log.Printf("SynthesizeUpdate: config file: %v", err)
+	}
+	return settings
+}
+
 func recordReport(cfg *Config, report *ModelReport, original *GalleryEntry) {
 	cfg.Reports = append(cfg.Reports, report)
 	cfg.checked++
@@ -633,17 +648,19 @@ func recordReport(cfg *Config, report *ModelReport, original *GalleryEntry) {
 
 	if cfg.OutputDir != "" {
 		pr := &PersistentReport{
-			Name:          report.Name,
-			EntryIndex:    report.EntryIndex,
-			HFRepo:        report.HFRepo,
-			HFRepos:       report.HFRepos,
-			Findings:      report.Findings,
-			FileResults:   report.FileResults,
-			SafetyOK:      report.SafetyOK,
-			SafetyNote:    report.SafetyNote,
-			OriginalEntry: original,
-			ProposedEntry: report.ProposedEntry,
-			CheckedAt:     time.Now().Format("2006-01-02"),
+			Name:           report.Name,
+			EntryIndex:     report.EntryIndex,
+			HFRepo:         report.HFRepo,
+			HFRepos:        report.HFRepos,
+			Findings:       report.Findings,
+			FileResults:    report.FileResults,
+			SafetyOK:       report.SafetyOK,
+			SafetyNote:     report.SafetyNote,
+			Downloads:      report.Downloads,
+			HFLastModified: report.HFLastModified,
+			OriginalEntry:  original,
+			ProposedEntry:  report.ProposedEntry,
+			CheckedAt:      time.Now().Format("2006-01-02"),
 		}
 		if err := WriteReportFiles(cfg.OutputDir, pr); err != nil {
 			log.Printf("SynthesizeUpdate: write report files: %v", err)
@@ -670,11 +687,11 @@ func idleHandler(cfg *Config) behtree.Handler {
 // generateFindings compares current entry metadata against HF metadata and
 // builds a proposed entry with all changes applied. If llm is non-nil, uses
 // LLM suggestions for tags, description, and usecases.
-func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LLMSuggestion) ([]Finding, *GalleryEntry) {
+func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LLMSuggestion, fileResults []FileCheckResult, configSettings *ConfigFileSettings) ([]Finding, *GalleryEntry) {
 	var findings []Finding
 
 	// Deep-copy entry via JSON round-trip
-	proposed := cloneEntry(entry)
+	proposed := CloneEntry(entry)
 
 	if dryRun {
 		proposed.LastChecked = time.Now().Format("2006-01-02")
@@ -699,6 +716,24 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 		})
 	}
 
+	findings = appendContentFindings(findings, entry, proposed, hf, llm, configSettings)
+
+	// Last checked
+	proposed.LastChecked = time.Now().Format("2006-01-02")
+	findings = append(findings, Finding{
+		Field:    "last_checked",
+		Current:  entry.LastChecked,
+		Proposed: proposed.LastChecked,
+		Source:   "scan",
+	})
+
+	findings = appendSHAFindings(findings, proposed, fileResults)
+
+	return findings, proposed
+}
+
+// appendContentFindings generates findings for description, tags, usecases, and icon.
+func appendContentFindings(findings []Finding, entry, proposed *GalleryEntry, hf *HFModelInfo, llm *LLMSuggestion, configSettings *ConfigFileSettings) []Finding {
 	// Description
 	desc := entry.Description
 	if desc == "" {
@@ -714,7 +749,6 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 			source = "LLM from model card"
 		}
 		proposed.Description = proposedDesc
-		// Clear overrides description if we're setting top-level
 		if proposed.Overrides != nil {
 			delete(proposed.Overrides, "description")
 		}
@@ -726,7 +760,7 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 		})
 	}
 
-	// Tags — always review when LLM is available, fallback to HF for empty/default
+	// Tags
 	if llm != nil && len(llm.Tags) > 0 {
 		if !sameStringSet(entry.Tags, llm.Tags) {
 			proposed.Tags = llm.Tags
@@ -750,34 +784,7 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 		}
 	}
 
-	// Known usecases — always review when LLM is available
-	if llm != nil && len(llm.KnownUsecases) > 0 {
-		var current []string
-		if ov, ok := entry.Overrides["known_usecases"]; ok {
-			if usecases, ok := ov.([]any); ok {
-				for _, u := range usecases {
-					current = append(current, fmt.Sprint(u))
-				}
-			}
-		}
-		if !sameStringSet(current, llm.KnownUsecases) {
-			if proposed.Overrides == nil {
-				proposed.Overrides = make(map[string]any)
-			}
-			// Store as []any for YAML compatibility
-			usecaseAny := make([]any, len(llm.KnownUsecases))
-			for i, u := range llm.KnownUsecases {
-				usecaseAny[i] = u
-			}
-			proposed.Overrides["known_usecases"] = usecaseAny
-			findings = append(findings, Finding{
-				Field:    "known_usecases",
-				Current:  fmt.Sprintf("%v", current),
-				Proposed: fmt.Sprintf("%v", llm.KnownUsecases),
-				Source:   "LLM from model card",
-			})
-		}
-	}
+	findings = appendUsecaseFindings(findings, entry, proposed, llm, configSettings)
 
 	// Icon
 	if entry.Icon == "" && hf.Author != "" {
@@ -791,20 +798,105 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 		})
 	}
 
-	// Last checked
-	proposed.LastChecked = time.Now().Format("2006-01-02")
-	findings = append(findings, Finding{
-		Field:    "last_checked",
-		Current:  entry.LastChecked,
-		Proposed: proposed.LastChecked,
-		Source:   "scan",
-	})
-
-	return findings, proposed
+	return findings
 }
 
-// cloneEntry deep-copies a GalleryEntry via JSON round-trip.
-func cloneEntry(entry *GalleryEntry) *GalleryEntry {
+// appendUsecaseFindings generates findings for known_usecases.
+// The effective current value comes from overrides OR the config file (since
+// LocalAI reads known_usecases from the config_file string at install time).
+// Only propose a change when neither source has the right value.
+func appendUsecaseFindings(findings []Finding, entry, proposed *GalleryEntry, llm *LLMSuggestion, cfg *ConfigFileSettings) []Finding {
+	var current []string
+	fromConfig := false
+	if ov, ok := entry.Overrides["known_usecases"]; ok {
+		if usecases, ok := ov.([]any); ok {
+			for _, u := range usecases {
+				current = append(current, fmt.Sprint(u))
+			}
+		}
+	}
+	// Config file also contributes — LocalAI reads known_usecases from it
+	if len(current) == 0 && cfg != nil {
+		current = cfg.KnownUsecases
+		fromConfig = len(current) > 0
+	}
+
+	target := ""
+	if fromConfig || (len(current) == 0 && cfg != nil) {
+		target = TargetConfigFile
+	}
+
+	// LLM suggestion is only useful when no source has usecases
+	if llm != nil && len(llm.KnownUsecases) > 0 {
+		valid := filterValidUsecases(llm.KnownUsecases)
+		if len(valid) > 0 && !sameStringSet(current, valid) {
+			return appendUsecaseUpdate(findings, proposed, current, valid, "LLM from model card", target)
+		}
+	}
+	return findings
+}
+
+var validUsecases = map[string]bool{
+	"chat": true, "completion": true, "edit": true,
+	"embeddings": true, "rerank": true, "image": true,
+	"transcript": true, "tts": true, "sound_generation": true,
+	"video": true, "detection": true, "vad": true, "tokenize": true,
+}
+
+func filterValidUsecases(usecases []string) []string {
+	var valid []string
+	for _, u := range usecases {
+		if validUsecases[u] {
+			valid = append(valid, u)
+		}
+	}
+	return valid
+}
+
+func appendUsecaseUpdate(findings []Finding, proposed *GalleryEntry, current, usecases []string, source, target string) []Finding {
+	if target != TargetConfigFile {
+		if proposed.Overrides == nil {
+			proposed.Overrides = make(map[string]any)
+		}
+		usecaseAny := make([]any, len(usecases))
+		for i, u := range usecases {
+			usecaseAny[i] = u
+		}
+		proposed.Overrides["known_usecases"] = usecaseAny
+	}
+	return append(findings, Finding{
+		Field:    "known_usecases",
+		Current:  fmt.Sprintf("%v", current),
+		Proposed: fmt.Sprintf("%v", usecases),
+		Source:   source,
+		Target:   target,
+	})
+}
+
+// appendSHAFindings adds reviewable findings for SHA mismatches so users can
+// accept legitimate model updates.
+func appendSHAFindings(findings []Finding, proposed *GalleryEntry, fileResults []FileCheckResult) []Finding {
+	for _, fr := range fileResults {
+		if !fr.SHAMatch && fr.ActualSHA != "" && fr.ExpectedSHA != "" {
+			for j := range proposed.Files {
+				if proposed.Files[j].Filename == fr.Filename {
+					proposed.Files[j].SHA256 = fr.ActualSHA
+					break
+				}
+			}
+			findings = append(findings, Finding{
+				Field:    "SHA256:" + fr.Filename,
+				Current:  fr.ExpectedSHA,
+				Proposed: fr.ActualSHA,
+				Source:   "HF file listing",
+			})
+		}
+	}
+	return findings
+}
+
+// CloneEntry deep-copies a GalleryEntry via JSON round-trip.
+func CloneEntry(entry *GalleryEntry) *GalleryEntry {
 	data, _ := json.Marshal(entry)
 	var clone GalleryEntry
 	_ = json.Unmarshal(data, &clone)

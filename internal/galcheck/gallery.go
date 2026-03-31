@@ -127,7 +127,8 @@ func ExtractHFRepo(entry *GalleryEntry) string {
 }
 
 // ApplyReports loads the gallery YAML, replaces entries matching report names
-// with their proposed entries, and writes the result back atomically.
+// with their proposed entries, writes the result back atomically, and applies
+// any config_file-targeted changes to individual model config YAMLs.
 func ApplyReports(galleryPath string, reports []*PersistentReport) (int, error) {
 	entries, err := LoadGallery(galleryPath)
 	if err != nil {
@@ -138,7 +139,19 @@ func ApplyReports(galleryPath string, reports []*PersistentReport) (int, error) 
 	updates := make(map[string]*GalleryEntry, len(reports))
 	deletions := make(map[string]bool)
 	for _, r := range reports {
-		if r.ProposedEntry != nil {
+		// Skip non-approved reports when review data is present
+		if r.ReviewStatus != "" && r.ReviewStatus != "approved" {
+			continue
+		}
+
+		if hasReviewData(r) {
+			rebuilt := RebuildProposedEntry(r)
+			if rebuilt != nil {
+				updates[r.Name] = rebuilt
+			} else {
+				deletions[r.Name] = true
+			}
+		} else if r.ProposedEntry != nil {
 			updates[r.Name] = r.ProposedEntry
 		} else {
 			deletions[r.Name] = true
@@ -160,6 +173,14 @@ func ApplyReports(galleryPath string, reports []*PersistentReport) (int, error) 
 		}
 	}
 	entries = kept
+
+	// Apply config_file-targeted changes (e.g. known_usecases in model YAMLs)
+	galleryDir := filepath.Dir(galleryPath)
+	cfgApplied, err := ApplyConfigFileChanges(galleryDir, reports)
+	if err != nil {
+		return 0, fmt.Errorf("apply config file changes: %w", err)
+	}
+	applied += cfgApplied
 
 	if applied == 0 {
 		return 0, nil
@@ -196,6 +217,149 @@ func atomicWriteFile(path string, data []byte) error {
 	}
 
 	return os.Rename(tmpPath, path)
+}
+
+// ConfigFileSettings holds fields from the model config YAML that are relevant
+// to gallery metadata.
+type ConfigFileSettings struct {
+	KnownUsecases []string `yaml:"known_usecases"`
+}
+
+// resolveConfigFilename extracts the local filename from a gallery entry's URL.
+// Handles the github:owner/repo/path@ref scheme.
+func resolveConfigFilename(entryURL string) string {
+	// github:mudler/LocalAI/gallery/foo.yaml@master → foo.yaml
+	after, ok := strings.CutPrefix(entryURL, "github:")
+	if !ok {
+		return ""
+	}
+	path := strings.SplitN(after, "@", 2)[0] // strip @ref
+	return filepath.Base(path)
+}
+
+// LoadConfigFileSettings reads the model config YAML (the file pointed to by the
+// entry's url field) from galleryDir and extracts gallery-relevant settings.
+func LoadConfigFileSettings(galleryDir string, entry *GalleryEntry) (*ConfigFileSettings, error) {
+	filename := resolveConfigFilename(entry.URL)
+	if filename == "" {
+		return nil, nil
+	}
+
+	data, err := os.ReadFile(filepath.Join(galleryDir, filename))
+	if err != nil {
+		return nil, fmt.Errorf("read config file %s: %w", filename, err)
+	}
+
+	// Outer YAML has config_file as a string containing inner YAML
+	var outer struct {
+		ConfigFile string `yaml:"config_file"`
+	}
+	if err := yaml.Unmarshal(data, &outer); err != nil {
+		return nil, fmt.Errorf("parse outer YAML %s: %w", filename, err)
+	}
+	if outer.ConfigFile == "" {
+		return nil, nil
+	}
+
+	var settings ConfigFileSettings
+	if err := yaml.Unmarshal([]byte(outer.ConfigFile), &settings); err != nil {
+		return nil, fmt.Errorf("parse config_file in %s: %w", filename, err)
+	}
+
+	return &settings, nil
+}
+
+// ApplyConfigFileChanges updates known_usecases in model config YAML files
+// for any approved findings with Target=="config_file".
+func ApplyConfigFileChanges(galleryDir string, reports []*PersistentReport) (int, error) {
+	applied := 0
+
+	for _, r := range reports {
+		if r.ReviewStatus != "" && r.ReviewStatus != "approved" {
+			continue
+		}
+
+		entry := r.OriginalEntry
+		if entry == nil {
+			continue
+		}
+
+		for _, f := range r.Findings {
+			if f.Field != "known_usecases" || f.Target != TargetConfigFile {
+				continue
+			}
+			if f.Accepted == nil || !*f.Accepted {
+				continue
+			}
+			if err := updateConfigFileUsecases(galleryDir, entry, f.Proposed); err != nil {
+				return applied, fmt.Errorf("update config %s: %w", r.Name, err)
+			}
+			applied++
+		}
+	}
+
+	return applied, nil
+}
+
+// updateConfigFileUsecases rewrites known_usecases in a model's config_file
+// string, preserving all other settings.
+func updateConfigFileUsecases(galleryDir string, entry *GalleryEntry, proposed string) error {
+	filename := resolveConfigFilename(entry.URL)
+	if filename == "" {
+		return fmt.Errorf("no config filename for url %q", entry.URL)
+	}
+	path := filepath.Join(galleryDir, filename)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	// Parse outer YAML to get config_file string
+	var outer map[string]any
+	if err := yaml.Unmarshal(data, &outer); err != nil {
+		return fmt.Errorf("parse outer: %w", err)
+	}
+
+	cfgStr, _ := outer["config_file"].(string)
+	if cfgStr == "" {
+		return fmt.Errorf("no config_file in %s", filename)
+	}
+
+	// Parse the inner YAML
+	var inner map[string]any
+	if err := yaml.Unmarshal([]byte(cfgStr), &inner); err != nil {
+		return fmt.Errorf("parse inner: %w", err)
+	}
+
+	// Parse proposed value like "[chat completion]"
+	usecases := parseProposedUsecases(proposed)
+	inner["known_usecases"] = usecases
+
+	// Re-marshal inner back to string
+	innerData, err := yaml.Marshal(inner)
+	if err != nil {
+		return fmt.Errorf("marshal inner: %w", err)
+	}
+	outer["config_file"] = string(innerData)
+
+	// Re-marshal outer
+	outData, err := yaml.Marshal(outer)
+	if err != nil {
+		return fmt.Errorf("marshal outer: %w", err)
+	}
+
+	return atomicWriteFile(path, outData)
+}
+
+// parseProposedUsecases parses the "[chat completion]" format back to a slice.
+func parseProposedUsecases(s string) []string {
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	if s == "" {
+		return nil
+	}
+	return strings.Fields(s)
 }
 
 func parseHFURL(raw string) string {

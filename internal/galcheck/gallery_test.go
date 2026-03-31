@@ -1,7 +1,11 @@
 package galcheck
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 func TestExtractHFRepos_MultiRepo(t *testing.T) {
@@ -152,6 +156,87 @@ func TestExtractHFRepo_BackwardsCompat(t *testing.T) {
 	repo := ExtractHFRepo(&entry)
 	if repo != "TheBloke/model-GGUF" {
 		t.Errorf("ExtractHFRepo = %q, want TheBloke/model-GGUF", repo)
+	}
+}
+
+func TestParseProposedUsecases(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  []string
+	}{
+		{"[chat completion]", []string{"chat", "completion"}},
+		{"[chat]", []string{"chat"}},
+		{"[]", nil},
+		{"", nil},
+	} {
+		got := parseProposedUsecases(tc.input)
+		if len(got) != len(tc.want) {
+			t.Errorf("parseProposedUsecases(%q) = %v, want %v", tc.input, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("parseProposedUsecases(%q)[%d] = %q, want %q", tc.input, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestUpdateConfigFileUsecases(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a config file similar to nanbeige4.1.yaml
+	configContent := `---
+name: test-model
+
+config_file: |
+  backend: llama-cpp
+  known_usecases:
+      - chat
+  parameters:
+      model: llama-cpp/models/test.gguf
+`
+	if err := os.WriteFile(filepath.Join(dir, "test-model.yaml"), []byte(configContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := &GalleryEntry{
+		Name: "test-model",
+		URL:  "github:owner/repo/gallery/test-model.yaml@master",
+	}
+
+	err := updateConfigFileUsecases(dir, entry, "[chat completion]")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-read and verify
+	data, err := os.ReadFile(filepath.Join(dir, "test-model.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var outer struct {
+		ConfigFile string `yaml:"config_file"`
+	}
+	if err := yaml.Unmarshal(data, &outer); err != nil {
+		t.Fatal(err)
+	}
+
+	var inner struct {
+		KnownUsecases []string `yaml:"known_usecases"`
+		Backend       string   `yaml:"backend"`
+	}
+	if err := yaml.Unmarshal([]byte(outer.ConfigFile), &inner); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(inner.KnownUsecases) != 2 || inner.KnownUsecases[0] != "chat" || inner.KnownUsecases[1] != "completion" {
+		t.Errorf("known_usecases = %v, want [chat completion]", inner.KnownUsecases)
+	}
+	// Verify other fields preserved
+	if inner.Backend != "llama-cpp" {
+		t.Errorf("backend = %q, want llama-cpp (other fields should be preserved)", inner.Backend)
 	}
 }
 
