@@ -339,3 +339,50 @@ make fmt       # auto-format
 ```
 
 Tests use Ginkgo/Gomega (BDD style).
+
+## Project Direction
+
+Currently behaviours (action handlers) are compiled Go functions registered in an `ActionRegistry`. The environment definitions, action selections, and goal are JSON — but the handlers themselves must be compiled into the binary. The ideas below explore ways to make the system more dynamic and accessible.
+
+### Runtime Behaviour Handlers
+
+[Yaegi](https://github.com/traefik/yaegi) is a pure-Go interpreter that can load and execute `.go` files at runtime. For behtree, this would mean writing handler functions as ordinary Go code that gets loaded without recompilation:
+
+1. Create a Yaegi interpreter with restricted stdlib access (no `unsafe`, `os/exec`, `syscall` by default)
+2. Selectively expose behtree types (`Params`, `State`, `OutcomeRequest`, `HandlerResult`) via `Use()`
+3. `Eval()` the handler source, type-assert to the handler signature, register in `ActionRegistry`
+
+Yaegi benchmarks show <10% overhead for real-world middleware — acceptable for BT tick cycles where handler logic is typically lightweight. Limitations: no cgo, no assembly, and `reflect` behaves slightly differently than compiled Go.
+
+**Alternatives:**
+
+- [Starlark-go](https://github.com/google/starlark-go) — hermetic sandboxing (no filesystem, network, or clock access), Python-like syntax. Best if handlers come from untrusted sources, but requires learning Starlark rather than writing Go.
+- [Tengo](https://github.com/d5/tengo) — bytecode VM with built-in resource limits (max allocations). Faster than Yaegi for compute-heavy handlers, but uses its own syntax.
+- [CEL-go](https://github.com/google/cel-go) — nanosecond-scale expression evaluation, non-Turing-complete. Excellent for condition logic but too limited for full action handlers.
+- [HashiCorp go-plugin](https://github.com/hashicorp/go-plugin) — process-level isolation via gRPC, proven in Terraform/Vault/Nomad. Maximum security but 30-50us RPC overhead per handler call and process management complexity.
+
+### External Process and HTTP Behaviours
+
+Rather than interpreting handler code, behaviours could delegate to external programs or HTTP endpoints. This makes behtree language-agnostic — handlers can be shell scripts, Python, Rust, or anything that speaks JSON.
+
+**Subprocess behaviour:** A generic `Exec` action launches an external process. Parameters are passed as JSON on stdin (structured data) or CLI arguments (simple scalars). The exit code maps to BT status: 0 = Success, non-zero = Failure, a designated code (e.g. 42) = Running. JSON on stdout provides state updates and log entries. Long-running processes return Running and store their PID in state; subsequent ticks check process status rather than re-launching.
+
+**HTTP behaviour:** A generic `HTTPRequest` action makes HTTP calls with templated URLs and bodies. Response status codes and JSON body fields map to BT status. The galcheck handlers already demonstrate this pattern — `HFClient` wraps HTTP calls with typed errors, timeouts, and JSON state storage.
+
+Both approaches use `context.WithTimeout` for deadline enforcement, matching the pattern already proven in galcheck.
+
+### Tree Visualization and Debugging
+
+Users don't edit trees directly (PA-BT generates them), but visualization helps with understanding and debugging. The tracing infrastructure (`RecordingTracer`, per-tick span trees with node status and state snapshots) provides the data.
+
+**Approaches, roughly ordered by effort:**
+
+- **Graphviz DOT export** — A `beht dot` command outputs `.dot` format, piped to `dot -Tsvg` for static tree images. Lowest effort (~50-100 LOC), useful for documentation and quick inspection. No interactivity.
+
+- **Web UI ([React Flow](https://reactflow.dev/) + [Elkjs](https://www.npmjs.com/package/elkjs))** — Interactive pan/zoom with nodes colored by type. Could read static JSON from `beht plan` output for tree display, or connect via WebSocket for live tick streaming. Trace replay would step through JSONL files tick-by-tick, highlighting active nodes with a state sidebar showing mutations. Medium effort but the most capable option.
+
+- **TUI ([Bubble Tea](https://github.com/charmbracelet/bubbletea))** — Terminal-native tree navigation with keyboard controls. Works over SSH, no browser needed. Limited by screen width for deep trees. The [tree-bubble](https://github.com/savannahostrowski/tree-bubble) widget provides a starting point.
+
+- **[Adobe Behavior Tree Editor](https://github.com/adobe/behavior_tree_editor)** — Web-based editor with drag-and-drop. Designed for manual tree editing rather than generated trees, so would need read-only adaptation and JSON format conversion. The `$param` template syntax conflicts with Adobe's `${}` templates.
+
+The user workflow would be: define objects and available actions in JSON, have PA-BT generate the tree, then visualize and step through execution to verify the tree behaves as expected. An interactive UI could also support filling in action selections (the LLM's job) manually for testing.
