@@ -144,7 +144,7 @@ func ApplyReports(galleryPath string, reports []*PersistentReport) (int, error) 
 			continue
 		}
 
-		if hasReviewData(r) {
+		if HasReviewData(r) {
 			rebuilt := RebuildProposedEntry(r)
 			if rebuilt != nil {
 				updates[r.Name] = rebuilt
@@ -219,9 +219,25 @@ func atomicWriteFile(path string, data []byte) error {
 	return os.Rename(tmpPath, path)
 }
 
+// ExtractBackend returns the backend name from a gallery entry, checking
+// Overrides first then ConfigFile.
+func ExtractBackend(entry *GalleryEntry) string {
+	if entry == nil {
+		return ""
+	}
+	if b, ok := entry.Overrides["backend"].(string); ok && b != "" {
+		return b
+	}
+	if b, ok := entry.ConfigFile["backend"].(string); ok && b != "" {
+		return b
+	}
+	return ""
+}
+
 // ConfigFileSettings holds fields from the model config YAML that are relevant
 // to gallery metadata.
 type ConfigFileSettings struct {
+	Backend       string   `yaml:"backend"`
 	KnownUsecases []string `yaml:"known_usecases"`
 }
 

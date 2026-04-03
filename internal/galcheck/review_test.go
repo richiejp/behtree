@@ -172,19 +172,19 @@ func TestRebuildProposedEntry_UsecasesConfigTarget(t *testing.T) {
 func TestHasReviewData(t *testing.T) {
 	// No review data
 	r := &PersistentReport{Findings: []Finding{{Field: "License"}}}
-	if hasReviewData(r) {
+	if HasReviewData(r) {
 		t.Error("expected false for unreviewed report")
 	}
 
 	// Has finding review
 	r.Findings[0].Accepted = boolPtr(true)
-	if !hasReviewData(r) {
+	if !HasReviewData(r) {
 		t.Error("expected true when finding has Accepted set")
 	}
 
 	// Has status only
 	r2 := &PersistentReport{ReviewStatus: "approved"}
-	if !hasReviewData(r2) {
+	if !HasReviewData(r2) {
 		t.Error("expected true when ReviewStatus is set")
 	}
 }

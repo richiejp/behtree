@@ -176,12 +176,19 @@ func truncSHA(sha string) string {
 	return sha
 }
 
-// ExtractLicense tries to extract a SPDX license ID from HF model tags.
-func ExtractLicense(tags []string) string {
-	for _, tag := range tags {
+// ExtractLicense extracts the license from HF model metadata.
+// Uses cardData.license_name for custom licenses tagged as "other".
+func ExtractLicense(info *HFModelInfo) string {
+	for _, tag := range info.Tags {
 		if after, ok := strings.CutPrefix(tag, "license:"); ok {
+			if after == "other" || after == "unknown" || after == "" {
+				continue
+			}
 			return after
 		}
+	}
+	if info.CardData.LicenseName != "" {
+		return info.CardData.LicenseName
 	}
 	return ""
 }

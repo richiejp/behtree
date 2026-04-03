@@ -310,6 +310,14 @@ func fetchSingleRepoInfo(cfg *Config, repoID string) *RepoInfo {
 	}
 	ri.Metadata = info
 
+	if info.Author != "" {
+		if avatarURL, err := cfg.HF.GetAvatarURL(info.Author); err == nil {
+			info.AvatarURL = avatarURL
+		} else if cfg.Verbose {
+			log.Printf("FetchModelInfo: %s avatar: %v", repoID, err)
+		}
+	}
+
 	readme, err := cfg.HF.GetReadme(repoID)
 	if err != nil {
 		if cfg.Verbose {
@@ -705,7 +713,7 @@ func generateFindings(entry *GalleryEntry, hf *HFModelInfo, dryRun bool, llm *LL
 	}
 
 	// License
-	hfLicense := ExtractLicense(hf.Tags)
+	hfLicense := ExtractLicense(hf)
 	if hfLicense != "" && entry.License != hfLicense {
 		proposed.License = hfLicense
 		findings = append(findings, Finding{
@@ -787,13 +795,12 @@ func appendContentFindings(findings []Finding, entry, proposed *GalleryEntry, hf
 	findings = appendUsecaseFindings(findings, entry, proposed, llm, configSettings)
 
 	// Icon
-	if entry.Icon == "" && hf.Author != "" {
-		iconURL := fmt.Sprintf("https://cdn-avatars.huggingface.co/v1/production/uploads/%s", hf.Author)
-		proposed.Icon = iconURL
+	if entry.Icon == "" && hf.AvatarURL != "" {
+		proposed.Icon = hf.AvatarURL
 		findings = append(findings, Finding{
 			Field:    "Icon",
 			Current:  "",
-			Proposed: iconURL,
+			Proposed: hf.AvatarURL,
 			Source:   "HF author avatar",
 		})
 	}
@@ -826,9 +833,11 @@ func appendUsecaseFindings(findings []Finding, entry, proposed *GalleryEntry, ll
 		target = TargetConfigFile
 	}
 
+	backend := ExtractBackend(entry)
+
 	// LLM suggestion is only useful when no source has usecases
 	if llm != nil && len(llm.KnownUsecases) > 0 {
-		valid := filterValidUsecases(llm.KnownUsecases)
+		valid := filterValidUsecases(llm.KnownUsecases, backend)
 		if len(valid) > 0 && !sameStringSet(current, valid) {
 			return appendUsecaseUpdate(findings, proposed, current, valid, "LLM from model card", target)
 		}
@@ -836,17 +845,14 @@ func appendUsecaseFindings(findings []Finding, entry, proposed *GalleryEntry, ll
 	return findings
 }
 
-var validUsecases = map[string]bool{
-	"chat": true, "completion": true, "edit": true,
-	"embeddings": true, "rerank": true, "image": true,
-	"transcript": true, "tts": true, "sound_generation": true,
-	"video": true, "detection": true, "vad": true, "tokenize": true,
-}
-
-func filterValidUsecases(usecases []string) []string {
+func filterValidUsecases(usecases []string, backend string) []string {
+	allowed := make(map[string]bool)
+	for _, u := range ValidUsecasesForBackend(backend) {
+		allowed[u] = true
+	}
 	var valid []string
 	for _, u := range usecases {
-		if validUsecases[u] {
+		if allowed[u] {
 			valid = append(valid, u)
 		}
 	}
@@ -976,7 +982,6 @@ Output a JSON object with these fields:
 These map to LocalAI capabilities. Pick all that apply:
 - "chat" — conversational/instruction-following LLM
 - "completion" — text completion
-- "edit" — text editing
 - "embeddings" — embedding/vector generation
 - "rerank" — reranking/retrieval
 - "image" — image generation (diffusers, stable diffusion, flux, etc.)
@@ -1108,6 +1113,7 @@ Description: %s
 Known usecases: %s
 Backend: %s
 
+%s
 ## HuggingFace Repos (%d repos referenced)
 %s
 ### File → Repo mapping
@@ -1117,10 +1123,23 @@ Backend: %s
 		truncateStr(currentDesc, 200),
 		currentUsecases,
 		fmt.Sprint(entry.Overrides["backend"]),
+		backendConstraints(ExtractBackend(entry)),
 		len(repos),
 		formatRepoSections(allRepoInfo, repos),
 		fileMappings.String(),
 	)
+}
+
+func backendConstraints(backend string) string {
+	if backend == "" || !IsKnownBackend(backend) {
+		return ""
+	}
+	valid := ValidUsecasesForBackend(backend)
+	return fmt.Sprintf(`
+## Backend Constraints
+This model uses backend %q which only supports these usecases: %s
+Do NOT suggest usecases outside this list.
+`, backend, strings.Join(valid, ", "))
 }
 
 // callLLM asks the LLM to suggest primary repo, tags, usecases, and description.
@@ -1133,7 +1152,7 @@ func callLLM(cfg *Config, entry *GalleryEntry, allRepoInfo map[string]*RepoInfo,
 
 	req := openai.ChatCompletionRequest{
 		Model:     cfg.LLMModel,
-		MaxTokens: 1024,
+		MaxTokens: 8192,
 		Messages: []openai.ChatCompletionMessage{
 			{Role: openai.ChatMessageRoleSystem, Content: metadataSystemPrompt},
 			{Role: openai.ChatMessageRoleUser, Content: userPrompt},
@@ -1142,7 +1161,7 @@ func callLLM(cfg *Config, entry *GalleryEntry, allRepoInfo map[string]*RepoInfo,
 
 	timeout := cfg.Timeout
 	if timeout == 0 {
-		timeout = 30 * time.Second
+		timeout = 60 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

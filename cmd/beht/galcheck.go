@@ -27,7 +27,7 @@ func runGalleryCheck() {
 	verbose := flags.Bool("verbose", false, "Print detailed progress")
 	maxTicks := flags.Int("max-ticks", 1000, "Max interpreter ticks before stopping")
 	maxDelay := flags.Int("max-delay", 7, "Max backoff delay in seconds on repeated failures")
-	timeoutSecs := flags.Int("timeout", 30, "Timeout in seconds for LLM and HF API calls")
+	timeoutSecs := flags.Int("timeout", 60, "Timeout in seconds for LLM and HF API calls")
 
 	// LLM flags for tag/description synthesis
 	model := flags.String("model", "", "LLM model name for metadata synthesis (optional)")

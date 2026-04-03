@@ -81,8 +81,8 @@ func RebuildProposedEntry(report *PersistentReport) *GalleryEntry {
 	return entry
 }
 
-// hasReviewData checks if any finding has been reviewed.
-func hasReviewData(report *PersistentReport) bool {
+// HasReviewData checks if any finding has been reviewed.
+func HasReviewData(report *PersistentReport) bool {
 	for _, f := range report.Findings {
 		if f.Accepted != nil {
 			return true
@@ -98,6 +98,7 @@ type ReportSummary struct {
 	FindingCount   int    `json:"finding_count"`
 	SafetyOK       bool   `json:"safety_ok"`
 	HFRepo         string `json:"hf_repo"`
+	Backend        string `json:"backend"`
 	CheckedAt      string `json:"checked_at"`
 	Downloads      int    `json:"downloads"`
 	HFLastModified string `json:"last_modified_hf"`
@@ -107,8 +108,9 @@ type ReportSummary struct {
 type ReviewUpdate struct {
 	ReviewStatus string `json:"review_status"`
 	Findings     []struct {
-		Index    int  `json:"index"`
-		Accepted bool `json:"accepted"`
+		Index    int    `json:"index"`
+		Accepted bool   `json:"accepted"`
+		Proposed string `json:"proposed,omitempty"`
 	} `json:"findings"`
 }
 
@@ -150,6 +152,8 @@ func (rs *ReviewServer) Handler() http.Handler {
 	mux.HandleFunc("GET /api/reports", rs.handleListReports)
 	mux.HandleFunc("GET /api/reports/{name}", rs.handleGetReport)
 	mux.HandleFunc("PUT /api/reports/{name}", rs.handleSaveReview)
+	mux.HandleFunc("GET /api/backends", handleBackends)
+	mux.HandleFunc("POST /api/auto-approve", rs.handleAutoApprove)
 	return mux
 }
 
@@ -175,6 +179,7 @@ func (rs *ReviewServer) handleListReports(w http.ResponseWriter, _ *http.Request
 			FindingCount:   len(r.Findings),
 			SafetyOK:       r.SafetyOK,
 			HFRepo:         r.HFRepo,
+			Backend:        ExtractBackend(r.OriginalEntry),
 			CheckedAt:      r.CheckedAt,
 			Downloads:      r.Downloads,
 			HFLastModified: r.HFLastModified,
@@ -225,6 +230,9 @@ func (rs *ReviewServer) handleSaveReview(w http.ResponseWriter, r *http.Request)
 		if fu.Index >= 0 && fu.Index < len(report.Findings) {
 			accepted := fu.Accepted
 			report.Findings[fu.Index].Accepted = &accepted
+			if fu.Proposed != "" {
+				report.Findings[fu.Index].Proposed = fu.Proposed
+			}
 		}
 	}
 	rs.mu.Unlock()
@@ -237,4 +245,25 @@ func (rs *ReviewServer) handleSaveReview(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "saved"})
+}
+
+func handleBackends(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(BackendUsecases)
+}
+
+func (rs *ReviewServer) handleAutoApprove(w http.ResponseWriter, _ *http.Request) {
+	rs.mu.Lock()
+	result := ConservativeAutoApprove(rs.reports)
+	for _, r := range rs.reports {
+		if HasReviewData(r) {
+			if err := WriteReportFiles(rs.dir, r); err != nil {
+				log.Printf("auto-approve save %s: %v", r.Name, err)
+			}
+		}
+	}
+	rs.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
 }

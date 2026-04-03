@@ -87,6 +87,36 @@
   .seg-active { background: #333 !important; color: #e0e0e0 !important; }
   .seg-active-approve { background: #1b5e20 !important; color: #fff !important; }
   .seg-active-reject { background: #b71c1c !important; color: #fff !important; }
+
+  /* Tag editor */
+  .tag-list { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .tag-chip {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 2px 8px; border-radius: 12px; font-size: 12px;
+    background: #1b5e20; color: #c8e6c9; border: 1px solid #2e7d32;
+  }
+  .tag-chip.current-tag { background: #4a1a1a; color: #ef9a9a; border-color: #6a2a2a; }
+  .tag-chip .remove-tag {
+    cursor: pointer; font-size: 14px; line-height: 1; margin-left: 2px;
+    color: inherit; opacity: 0.7;
+  }
+  .tag-chip .remove-tag:hover { opacity: 1; }
+  .add-tag-wrap { position: relative; display: inline-block; }
+  .add-tag-btn {
+    padding: 2px 8px; border-radius: 12px; font-size: 12px; cursor: pointer;
+    background: #1a1a2e; color: #888; border: 1px dashed #444;
+  }
+  .add-tag-btn:hover { border-color: #888; color: #e0e0e0; }
+  .add-tag-dropdown {
+    position: absolute; top: 100%; left: 0; z-index: 10; margin-top: 4px;
+    background: #16213e; border: 1px solid #444; border-radius: 4px;
+    padding: 4px; display: flex; flex-direction: column; gap: 2px; min-width: 140px;
+  }
+  .add-tag-dropdown button {
+    padding: 4px 8px; border: none; border-radius: 3px; cursor: pointer;
+    font-size: 12px; text-align: left; background: transparent; color: #e0e0e0;
+  }
+  .add-tag-dropdown button:hover { background: #0f3460; }
 </style>
 </head>
 <body x-data="app()" x-init="loadReports()">
@@ -102,6 +132,12 @@
       <option value="approved">Approved</option>
       <option value="rejected">Rejected</option>
     </select>
+    <select x-model="backendFilter">
+      <option value="all">All backends</option>
+      <template x-for="b in backendNames" :key="b">
+        <option :value="b" x-text="b"></option>
+      </template>
+    </select>
     <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
       <label style="font-size:11px;color:#888;">
         <input type="checkbox" x-model="sortEnabled"> Sort:
@@ -110,6 +146,11 @@
       <input type="range" min="0" max="1" step="0.05" x-model.number="sortWeight"
              :disabled="!sortEnabled" style="flex:1;">
       <span style="font-size:10px;color:#888;">Pop</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+      <button style="padding:4px 8px;border-radius:4px;font-size:11px;cursor:pointer;border:1px solid #444;background:#1a1a2e;color:#888;"
+              @click="autoApproveAll()">Auto-approve</button>
+      <span x-show="autoApproveResult" style="font-size:11px;color:#4caf50;" x-text="autoApproveResult"></span>
     </div>
     <div class="counts" x-text="filteredReports.length + ' / ' + reports.length + ' models'"></div>
   </div>
@@ -133,10 +174,18 @@
   </template>
   <template x-if="selected">
     <div>
-      <h1 x-text="selected.name"></h1>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <template x-if="modelIcon()">
+          <img :src="modelIcon()" style="width:40px;height:40px;border-radius:6px;object-fit:cover;">
+        </template>
+        <h1 x-text="selected.name"></h1>
+      </div>
       <div class="meta">
         <template x-if="selected.hf_repo">
           <span>HF: <a :href="'https://huggingface.co/' + selected.hf_repo" target="_blank" x-text="selected.hf_repo"></a></span>
+        </template>
+        <template x-if="selectedBackend()">
+          <span> &middot; Backend: <span x-text="selectedBackend()" style="color:#ce93d8;"></span></span>
         </template>
         <span x-show="selected.checked_at"> &middot; Checked: <span x-text="selected.checked_at"></span></span>
         <span x-show="selected.downloads"> &middot; <span x-text="selected.downloads.toLocaleString()"></span> downloads/month</span>
@@ -173,8 +222,42 @@
             <template x-for="(f, i) in selected.findings" :key="i">
               <tr>
                 <td><span x-text="f.field"></span><template x-if="f.target === 'config_file'"><span style="color:#64b5f6;font-size:11px;"> (config)</span></template></td>
-                <td class="current"><span x-text="truncSHA(f.current) || 'MISSING'"></span></td>
-                <td class="proposed"><span x-text="truncSHA(f.proposed)"></span></td>
+                <td class="current">
+                  <template x-if="f.field === 'known_usecases'">
+                    <div class="tag-list">
+                      <template x-for="t in parseTags(f.current)" :key="t">
+                        <span class="tag-chip current-tag" x-text="t"></span>
+                      </template>
+                      <template x-if="!parseTags(f.current).length"><span>MISSING</span></template>
+                    </div>
+                  </template>
+                  <template x-if="f.field !== 'known_usecases'">
+                    <span x-text="truncSHA(f.current) || 'MISSING'"></span>
+                  </template>
+                </td>
+                <td class="proposed">
+                  <template x-if="f.field === 'known_usecases'">
+                    <div class="tag-list" x-data="{showAdd: false}">
+                      <template x-for="t in parseTags(f.proposed)" :key="t">
+                        <span class="tag-chip">
+                          <span x-text="t"></span>
+                          <span class="remove-tag" @click="removeUsecase(i, t)">&times;</span>
+                        </span>
+                      </template>
+                      <div class="add-tag-wrap">
+                        <button class="add-tag-btn" @click="showAdd = !showAdd">+</button>
+                        <div class="add-tag-dropdown" x-show="showAdd" @click.outside="showAdd = false">
+                          <template x-for="uc in availableUsecases(f.proposed)" :key="uc">
+                            <button @click="addUsecase(i, uc); showAdd = false" x-text="uc"></button>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="f.field !== 'known_usecases'">
+                    <span x-text="truncSHA(f.proposed)"></span>
+                  </template>
+                </td>
                 <td class="source" x-text="f.source"></td>
                 <td>
                   <div class="toggle-group">
@@ -223,11 +306,15 @@ function app() {
     selected: null,
     selectedName: '',
     filter: 'all',
+    backendFilter: 'all',
+    backendMap: {},
+    backendNames: [],
     search: '',
     saving: false,
     dirty: false,
     sortWeight: 0.5,
     sortEnabled: false,
+    autoApproveResult: '',
 
     get filteredReports() {
       let result = this.reports.filter(r => {
@@ -235,6 +322,7 @@ function app() {
           const status = r.review_status || 'pending';
           if (status !== this.filter && !(this.filter === 'pending' && !r.review_status)) return false;
         }
+        if (this.backendFilter !== 'all' && r.backend !== this.backendFilter) return false;
         if (this.search && !r.name.toLowerCase().includes(this.search.toLowerCase())) return false;
         return true;
       });
@@ -264,6 +352,66 @@ function app() {
       return result;
     },
 
+    get allUsecases() {
+      const set = new Set();
+      for (const b of Object.values(this.backendMap)) {
+        for (const u of (b.Possible || [])) set.add(u);
+      }
+      return [...set].sort();
+    },
+
+    parseTags(s) {
+      if (!s) return [];
+      s = s.replace(/^\[/, '').replace(/\]$/, '').trim();
+      if (!s) return [];
+      return s.split(/\s+/);
+    },
+
+    formatTags(tags) {
+      return '[' + tags.join(' ') + ']';
+    },
+
+    removeUsecase(findingIndex, tag) {
+      const f = this.selected.findings[findingIndex];
+      const tags = this.parseTags(f.proposed).filter(t => t !== tag);
+      f.proposed = this.formatTags(tags);
+      this.dirty = true;
+    },
+
+    addUsecase(findingIndex, tag) {
+      const f = this.selected.findings[findingIndex];
+      const tags = this.parseTags(f.proposed);
+      if (!tags.includes(tag)) {
+        tags.push(tag);
+        f.proposed = this.formatTags(tags);
+        this.dirty = true;
+      }
+    },
+
+    availableUsecases(proposed) {
+      const current = this.parseTags(proposed);
+      const backend = this.selectedBackend();
+      const possible = (backend && this.backendMap[backend]?.Possible) || this.allUsecases;
+      return possible.filter(uc => !current.includes(uc));
+    },
+
+    selectedBackend() {
+      if (!this.selected) return null;
+      const oe = this.selected.original_entry;
+      if (oe?.overrides?.backend) return oe.overrides.backend;
+      if (oe?.config_file?.backend) return oe.config_file.backend;
+      return null;
+    },
+
+    modelIcon() {
+      if (!this.selected) return null;
+      const pe = this.selected.proposed_entry;
+      if (pe && pe.icon) return pe.icon;
+      const oe = this.selected.original_entry;
+      if (oe && oe.icon) return oe.icon;
+      return null;
+    },
+
     truncSHA(s) {
       if (!s || s.length <= 16 || !/^[0-9a-f]+$/i.test(s)) return s;
       return s.slice(0, 12) + '...';
@@ -282,8 +430,13 @@ function app() {
     },
 
     async loadReports() {
-      const resp = await fetch('/api/reports');
-      this.reports = await resp.json();
+      const [reportsResp, backendsResp] = await Promise.all([
+        fetch('/api/reports'),
+        fetch('/api/backends'),
+      ]);
+      this.reports = await reportsResp.json();
+      this.backendMap = await backendsResp.json();
+      this.backendNames = Object.keys(this.backendMap).sort();
     },
 
     async selectReport(name) {
@@ -309,13 +462,29 @@ function app() {
     acceptAll() {
       if (!this.selected?.findings) return;
       this.selected.findings.forEach(f => f.accepted = true);
+      this.selected.review_status = 'approved';
       this.dirty = true;
     },
 
     rejectAll() {
       if (!this.selected?.findings) return;
       this.selected.findings.forEach(f => f.accepted = false);
+      this.selected.review_status = 'rejected';
       this.dirty = true;
+    },
+
+    async autoApproveAll() {
+      if (!confirm('Run conservative auto-approve on all pending reports?')) return;
+      try {
+        const resp = await fetch('/api/auto-approve', {method: 'POST'});
+        if (!resp.ok) throw new Error(await resp.text());
+        const r = await resp.json();
+        this.autoApproveResult = `${r.Approved} approved, ${r.Modified} modified, ${r.Skipped} skipped`;
+        await this.loadReports();
+        if (this.selectedName) await this.selectReport(this.selectedName);
+      } catch (e) {
+        alert('Auto-approve failed: ' + e.message);
+      }
     },
 
     async saveReview() {
@@ -334,6 +503,7 @@ function app() {
         findings: (this.selected.findings || []).map((f, i) => ({
           index: i,
           accepted: f.accepted === true,
+          proposed: f.proposed || '',
         })),
       };
 

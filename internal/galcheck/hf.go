@@ -47,13 +47,19 @@ func NewHFClient(timeout time.Duration) *HFClient {
 }
 
 type HFModelInfo struct {
-	ModelID      string   `json:"modelId"`
-	Author       string   `json:"author"`
-	Tags         []string `json:"tags"`
-	PipelineTag  string   `json:"pipelineTag"`
-	Downloads    int      `json:"downloads"`
-	Private      bool     `json:"private"`
-	LastModified string   `json:"lastModified"`
+	ModelID      string     `json:"modelId"`
+	Author       string     `json:"author"`
+	AvatarURL    string     `json:"avatarUrl,omitempty"`
+	Tags         []string   `json:"tags"`
+	PipelineTag  string     `json:"pipelineTag"`
+	Downloads    int        `json:"downloads"`
+	Private      bool       `json:"private"`
+	LastModified string     `json:"lastModified"`
+	CardData     HFCardData `json:"cardData"`
+}
+
+type HFCardData struct {
+	LicenseName string `json:"license_name"`
 }
 
 type HFFileInfo struct {
@@ -316,18 +322,71 @@ func (c *HFClient) NextResetTime() time.Time {
 	return latest
 }
 
+// GetAvatarURL fetches the avatar URL for an HF author (org or user)
+// and validates it with a HEAD request before returning.
+func (c *HFClient) GetAvatarURL(author string) (string, error) {
+	// Try organization first, then user
+	for _, kind := range []string{"organizations", "users"} {
+		apiURL := fmt.Sprintf("%s/api/%s/%s/avatar", c.baseURL, kind, author)
+
+		avatarURL, ok := c.fetchAvatarJSON(apiURL)
+		if !ok {
+			continue
+		}
+
+		if c.headOK(avatarURL) {
+			return avatarURL, nil
+		}
+	}
+
+	return "", fmt.Errorf("no avatar found for %s", author)
+}
+
+func (c *HFClient) fetchAvatarJSON(url string) (string, bool) {
+	resp, err := c.client.Get(url)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+
+	var result struct {
+		AvatarURL string `json:"avatarUrl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.AvatarURL == "" {
+		return "", false
+	}
+	return result.AvatarURL, true
+}
+
+func (c *HFClient) headOK(url string) bool {
+	req, err := http.NewRequest("HEAD", url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
 func resolveHFURI(uri, baseURL string) string {
-	if strings.HasPrefix(uri, "huggingface://") || strings.HasPrefix(uri, "hf://") {
-		var path string
-		if strings.HasPrefix(uri, "huggingface://") {
-			path = strings.TrimPrefix(uri, "huggingface://")
-		} else {
-			path = strings.TrimPrefix(uri, "hf://")
-		}
-		parts := strings.SplitN(path, "/", 3)
-		if len(parts) == 3 {
-			return fmt.Sprintf("%s/%s/%s/resolve/main/%s", baseURL, parts[0], parts[1], parts[2])
-		}
+	var path string
+	if p, ok := strings.CutPrefix(uri, "huggingface://"); ok {
+		path = p
+	} else if p, ok := strings.CutPrefix(uri, "hf://"); ok {
+		path = p
+	} else {
+		return uri
+	}
+	parts := strings.SplitN(path, "/", 3)
+	if len(parts) == 3 {
+		return fmt.Sprintf("%s/%s/%s/resolve/main/%s", baseURL, parts[0], parts[1], parts[2])
 	}
 	return uri
 }
